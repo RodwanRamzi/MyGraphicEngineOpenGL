@@ -29,7 +29,7 @@ A **custom OpenGL 4.6 game engine** built from scratch featuring **Deferred Shad
 
 ### 📦 Asset Pipeline
 - **Custom GLTF/GLB Loader**: Parses binary buffers, accessors, node hierarchies, textures, and tangents/bitangents for TBN matrices—all from scratch.
-- **Game Mode**: First-person player controller with physics (gravity, bouncing, collision).
+- **Game Mode**: First-person player controller with ball physics (gravity, bouncing, collision).
 
 ---
 
