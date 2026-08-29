@@ -15,8 +15,6 @@ namespace fs = std::filesystem;
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-#include "stb/stb_image.h"
-
 // ImGui
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -41,69 +39,6 @@ std::vector<EditorEntity> copyEntities(const std::vector<EditorEntity>& src) {
     return src;
 }
 
-// ==================== SKYBOX DATA (Working Method) ====================
-float skyboxVertices[] = {
-    // Coordinates (8 vertices)
-    -1.0f, -1.0f,  1.0f,
-     1.0f, -1.0f,  1.0f,
-     1.0f, -1.0f, -1.0f,
-    -1.0f, -1.0f, -1.0f,
-    -1.0f,  1.0f,  1.0f,
-     1.0f,  1.0f,  1.0f,
-     1.0f,  1.0f, -1.0f,
-    -1.0f,  1.0f, -1.0f
-};
-
-unsigned int skyboxIndices[] = {
-    // Right
-    1, 2, 6,
-    6, 5, 1,
-    // Left
-    0, 4, 7,
-    7, 3, 0,
-    // Top
-    4, 5, 6,
-    6, 7, 4,
-    // Bottom
-    0, 3, 2,
-    2, 1, 0,
-    // Back
-    0, 1, 5,
-    5, 4, 0,
-    // Front
-    3, 7, 6,
-    6, 2, 3
-};
-
-// ==================== CUBEMAP LOADER ====================
-unsigned int LoadCubemap(const std::vector<std::string>& faces) {
-    unsigned int textureID;
-    glGenTextures(1, &textureID);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, textureID);
-
-    int w, h, nrChannels;
-    for (unsigned int i = 0; i < faces.size(); i++) {
-        unsigned char* data = stbi_load(faces[i].c_str(), &w, &h, &nrChannels, 0);
-        if (data) {
-            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
-            stbi_image_free(data);
-            std::cout << "Loaded: " << faces[i] << std::endl;
-        }
-        else {
-            std::cout << "Failed to load: " << faces[i] << std::endl;
-            stbi_image_free(data);
-        }
-    }
-
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-
-    return textureID;
-}
-
 int main()
 {
     glfwInit();
@@ -123,8 +58,7 @@ int main()
     // ==================== SHADERS ====================
     Shader gBufferShader("gBuffer.vert", "gBuffer.frag");
     Shader deferredLightingShader("deferred_lighting.vert", "deferred_lighting.frag");
-    Shader depthShader("depth.vert", "depth.frag");
-    Shader skyboxShader("skybox.vert", "skybox.frag");
+    Shader depthShader("depth.vert", "depth.frag");  // NEW
 
     // ==================== CAMERA ====================
     Camera camera(width, height, glm::vec3(3.0f, 2.0f, 6.0f));
@@ -156,35 +90,6 @@ int main()
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
     glEnableVertexAttribArray(1);
-
-    // ==================== SKYBOX VAO (Working Method) ====================
-    unsigned int skyboxVAO, skyboxVBO, skyboxEBO;
-    glGenVertexArrays(1, &skyboxVAO);
-    glGenBuffers(1, &skyboxVBO);
-    glGenBuffers(1, &skyboxEBO);
-    glBindVertexArray(skyboxVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, skyboxVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(skyboxVertices), &skyboxVertices, GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, skyboxEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(skyboxIndices), &skyboxIndices, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-
-    // ==================== LOAD SKYBOX ====================
-    // Create paths to your skybox images
-    std::string skyboxFolder = "skybox/default/";
-    std::vector<std::string> skyboxFaces = {
-        skyboxFolder + "right.jpg",
-        skyboxFolder + "left.jpg",
-        skyboxFolder + "top.jpg",
-        skyboxFolder + "bottom.jpg",
-        skyboxFolder + "front.jpg",
-        skyboxFolder + "back.jpg"
-    };
-    unsigned int skyboxTexture = LoadCubemap(skyboxFaces);
 
     // ==================== G-BUFFER ====================
     unsigned int gBuffer;
@@ -256,7 +161,7 @@ int main()
     glReadBuffer(GL_NONE);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    // ==================== WHITE TEXTURE ====================
+    // ==================== WHITE TEXTURE (fallback) ====================
     unsigned int whiteTexture;
     glGenTextures(1, &whiteTexture);
     glBindTexture(GL_TEXTURE_2D, whiteTexture);
@@ -413,11 +318,6 @@ int main()
         std::cout << "Loaded level from " << levelPath << std::endl;
         };
 
-    // ==================== SKYBOX SETTINGS ====================
-    int selectedSkyboxIdx = 0;
-    const char* skyboxNames[] = { "Default", "Sunset", "Night", "Custom" };
-    char customSkyboxPath[256] = "";
-
     // ==================== LIGHT SETUP ====================
     glm::vec3 lightDir = glm::normalize(glm::vec3(0.5f, -1.0f, 0.3f));
     glm::vec4 lightColor = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -510,64 +410,6 @@ int main()
             if (!gameMode) entities = copyEntities(savedEntities);
         }
         ImGui::Separator();
-
-        // ==================== SKYBOX UI ====================
-        if (ImGui::CollapsingHeader("Skybox")) {
-            if (ImGui::Combo("Preset", &selectedSkyboxIdx, skyboxNames, IM_ARRAYSIZE(skyboxNames))) {
-                if (selectedSkyboxIdx == 0) {
-                    std::vector<std::string> faces = {
-                        "skybox/default/right.jpg",
-                        "skybox/default/left.jpg",
-                        "skybox/default/top.jpg",
-                        "skybox/default/bottom.jpg",
-                        "skybox/default/front.jpg",
-                        "skybox/default/back.jpg"
-                    };
-                    skyboxTexture = LoadCubemap(faces);
-                }
-                else if (selectedSkyboxIdx == 1) {
-                    std::vector<std::string> faces = {
-                        "skybox/sunset/right.jpg",
-                        "skybox/sunset/left.jpg",
-                        "skybox/sunset/top.jpg",
-                        "skybox/sunset/bottom.jpg",
-                        "skybox/sunset/front.jpg",
-                        "skybox/sunset/back.jpg"
-                    };
-                    skyboxTexture = LoadCubemap(faces);
-                }
-                else if (selectedSkyboxIdx == 2) {
-                    std::vector<std::string> faces = {
-                        "skybox/night/right.jpg",
-                        "skybox/night/left.jpg",
-                        "skybox/night/top.jpg",
-                        "skybox/night/bottom.jpg",
-                        "skybox/night/front.jpg",
-                        "skybox/night/back.jpg"
-                    };
-                    skyboxTexture = LoadCubemap(faces);
-                }
-            }
-
-            if (selectedSkyboxIdx == 3) {
-                ImGui::InputText("Custom Path", customSkyboxPath, sizeof(customSkyboxPath));
-                ImGui::Text("Place 6 images named:");
-                ImGui::Text("right.jpg, left.jpg, top.jpg");
-                ImGui::Text("bottom.jpg, front.jpg, back.jpg");
-                if (ImGui::Button("Load Custom Skybox")) {
-                    std::string path = customSkyboxPath;
-                    std::vector<std::string> faces = {
-                        path + "/right.jpg",
-                        path + "/left.jpg",
-                        path + "/top.jpg",
-                        path + "/bottom.jpg",
-                        path + "/front.jpg",
-                        path + "/back.jpg"
-                    };
-                    skyboxTexture = LoadCubemap(faces);
-                }
-            }
-        }
 
         // Add Object
         if (ImGui::CollapsingHeader("Add Object")) {
@@ -705,18 +547,7 @@ int main()
             entity.model->Draw(gBufferShader, camera, modelMat);
         }
 
-        // After geometry pass (G-Buffer), before lighting
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        // Simple debug shader – display albedo texture
-        Shader debugShader("debug.vert", "debug.frag");
-        debugShader.Activate();
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, gColor); // gColor = albedo
-        glUniform1i(glGetUniformLocation(debugShader.ID, "tex"), 0);
-        glBindVertexArray(rectVAO);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
 
         // ==================== LIGHTING PASS ====================
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -728,6 +559,7 @@ int main()
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gColor); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gColor"), 2);
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gMetallicRoughness); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gMetallicRoughness"), 3);
         glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, whiteTexture); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "ssao"), 4);
+        // Bind real shadow map
         glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, depthMap); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "shadowMap"), 5);
 
         glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "camPos"), camera.Position.x, camera.Position.y, camera.Position.z);
@@ -737,38 +569,13 @@ int main()
         glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightPos2"), 1, glm::value_ptr(lightPos2));
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "saturation"), saturation);
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "exposure"), exposure);
+        // Pass real light space matrix
         glUniformMatrix4fv(glGetUniformLocation(deferredLightingShader.ID, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
 
         glDisable(GL_DEPTH_TEST);
         glBindVertexArray(rectVAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glEnable(GL_DEPTH_TEST);
-
-        // ==================== SKYBOX RENDER (Working Method) ====================
-        // Use GL_LEQUAL so skybox draws behind everything
-        glDepthFunc(GL_LEQUAL);
-
-        skyboxShader.Activate();
-
-        // Remove translation from view matrix by converting to mat3 and back
-        glm::mat4 view = glm::mat4(glm::mat3(glm::lookAt(
-            camera.Position,
-            camera.Position + camera.Orientation,
-            camera.Up
-        )));
-        glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float)width / height, 0.1f, 100.0f);
-
-        glUniformMatrix4fv(glGetUniformLocation(skyboxShader.ID, "view"), 1, GL_FALSE, glm::value_ptr(view));
-        glUniformMatrix4fv(glGetUniformLocation(skyboxShader.ID, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-
-        glBindVertexArray(skyboxVAO);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, skyboxTexture);
-        glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
-        glBindVertexArray(0);
-
-        // Switch back to LESS depth function
-        glDepthFunc(GL_LESS);
 
         // ==================== IMGUI RENDER ====================
         ImGui::Render();
