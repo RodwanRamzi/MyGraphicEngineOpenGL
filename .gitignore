@@ -1,0 +1,31 @@
+# Visual Studio build files
+x64/
+.vs/
+Debug/
+Release/
+Shaders/
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.log
+*.tlog
+*.idb
+*.ipch
+*.iobj
+*.ipdb
+*.recipe
+*.lastbuildstate
+*.Build.CppClean.log
+*.vcxproj.FileListAbsolute.txt
+
+# Large archives
+*.rar
+*.zip
+
+# Personal files
+*.ini
+*.user
+
+# MyGraphi.30cb0123 (temp folder)
+MyGraphi.30cb0123/
