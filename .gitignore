@@ -29,3 +29,77 @@ Shaders/
 
 # MyGraphi.30cb0123 (temp folder)
 MyGraphi.30cb0123/
+
+echo .vs/ >> .gitignore
+echo x64/ >> .gitignore
+echo Debug/ >> .gitignore
+echo Release/ >> .gitignore
+echo *.obj >> .gitignore
+echo *.pdb >> .gitignore
+echo *.exe >> .gitignore
+echo *.dll >> .gitignore
+echo *.log >> .gitignore
+echo *.tmp >> .gitignore
+echo # >> .gitignore
+echo (c) >> .gitignore
+echo Aipconfig >> .gitignore
+echo Compressing >> .gitignore
+echo Counting >> .gitignore
+echo Delta >> .gitignore
+echo Enumerating >> .gitignore
+echo Everything >> .gitignore
+echo Microsoft >> .gitignore
+echo Successfully >> .gitignore
+echo Total >> .gitignore
+echo Uploading >> .gitignore
+echo Windows >> .gitignore
+echo Writing >> .gitignore
+echo cd >> .gitignore
+echo error >> .gitignore
+echo fatal >> .gitignore
+echo git >> .gitignore
+echo ipconfig >> .gitignore
+echo main >> .gitignore
+echo mkdir >> .gitignore
+echo move >> .gitignore
+echo operable >> .gitignore
+echo origin >> .gitignore
+echo ping >> .gitignore
+echo send-pack >> .gitignore
+echo winget >> .gitignore.vs/ 
+x64/ 
+Debug/ 
+Release/ 
+*.obj 
+*.pdb 
+*.exe 
+*.dll 
+*.log 
+*.tmp 
+# 
+(c) 
+Aipconfig 
+Compressing 
+Counting 
+Delta 
+Enumerating 
+Everything 
+Microsoft 
+Successfully 
+Total 
+Uploading 
+Windows 
+Writing 
+cd 
+error 
+fatal 
+git 
+ipconfig 
+main 
+mkdir 
+move 
+operable 
+origin 
+ping 
+send-pack 
+winget 
