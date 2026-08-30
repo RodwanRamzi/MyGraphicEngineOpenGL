@@ -1,4 +1,4 @@
-#include<filesystem>
+#include <filesystem>
 namespace fs = std::filesystem;
 
 #include "Model.h"
@@ -40,6 +40,37 @@ std::vector<EditorEntity> copyEntities(const std::vector<EditorEntity>& src) {
     return src;
 }
 
+// ==================== NORMALIZE PATH ====================
+std::string normalizePath(const std::string& path) {
+    std::string result = path;
+    std::replace(result.begin(), result.end(), '\\', '/');
+    return result;
+}
+
+// ==================== SCAN MODELS FOLDER ====================
+std::vector<std::string> scanModelsFolder(const std::string& folderPath) {
+    std::vector<std::string> modelFiles;
+
+    if (!fs::exists(folderPath) || !fs::is_directory(folderPath)) {
+        std::cout << "Folder not found: " << folderPath << std::endl;
+        return modelFiles;
+    }
+
+    for (const auto& entry : fs::recursive_directory_iterator(folderPath)) {
+        if (entry.is_regular_file()) {
+            std::string ext = entry.path().extension().string();
+            if (ext == ".gltf" || ext == ".glb") {
+                std::string fullPath = entry.path().string();
+                // Normalize: replace backslashes with forward slashes
+                std::replace(fullPath.begin(), fullPath.end(), '\\', '/');
+                modelFiles.push_back(fullPath);
+            }
+        }
+    }
+
+    return modelFiles;
+}
+
 int main()
 {
     glfwInit();
@@ -59,7 +90,7 @@ int main()
     // ==================== SHADERS ====================
     Shader gBufferShader("gBuffer.vert", "gBuffer.frag");
     Shader deferredLightingShader("deferred_lighting.vert", "deferred_lighting.frag");
-    Shader depthShader("depth.vert", "depth.frag");  // NEW
+    Shader depthShader("depth.vert", "depth.frag");
 
     // ==================== CAMERA ====================
     Camera camera(width, height, glm::vec3(3.0f, 2.0f, 6.0f));
@@ -69,6 +100,7 @@ int main()
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
+    /*io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;*/
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 460");
 
@@ -194,22 +226,26 @@ int main()
     bool showSkybox = true;
     bool useCustomSky = false;
 
-    // Custom sky colors
     glm::vec3 customTopColor = glm::vec3(0.2f, 0.4f, 0.8f);
     glm::vec3 customHorizonColor = glm::vec3(0.6f, 0.7f, 0.9f);
     glm::vec3 customBottomColor = glm::vec3(0.4f, 0.5f, 0.6f);
 
-    // Sun settings
     glm::vec3 customSunColor = glm::vec3(1.0f, 0.9f, 0.6f);
     glm::vec3 customSunDirection = glm::vec3(0.5f, -0.2f, 0.3f);
     float customSunIntensity = 1.0f;
 
-    // Cloud settings
     float customCloudDensity = 1.5f;
     float customCloudOpacity = 0.3f;
 
-    // Preset selection
     static int selectedSky = 0;
+
+    // ==================== CONTENT BROWSER ====================
+    std::vector<std::string> modelFiles;
+    std::string selectedModelPath = "";
+
+    // ==================== FOV ====================
+    float editorFOV = 75.0f;
+    float gameFOV = 65.0f;
 
     // ==================== MODEL LIST ====================
     std::vector<std::string> modelPaths = {
@@ -379,12 +415,12 @@ int main()
                     }
                 }
             }
-            camera.updateMatrix(45.0f, 0.1f, 1000.0f);
+            camera.updateMatrix(gameFOV, 0.1f, 1000.0f);
             if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) gameMode = false;
         }
         else {
             camera.Inputs(window);
-            camera.updateMatrix(45.0f, 0.1f, 1000.0f);
+            camera.updateMatrix(editorFOV, 0.1f, 1000.0f);
         }
 
         // ==================== IMGUI ====================
@@ -392,9 +428,13 @@ int main()
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
+        /*io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        ImGui::DockSpaceOverViewport(ImGui::GetMainViewport());*/
+
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z)) applyUndo();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y)) applyRedo();
 
+        // ==================== LEVEL EDITOR WINDOW ====================
         ImGui::Begin("Level Editor");
 
         // File management
@@ -431,110 +471,22 @@ int main()
             gameMode = !gameMode;
             if (!gameMode) entities = copyEntities(savedEntities);
         }
+
         ImGui::Separator();
 
-        // ==================== SKY SETTINGS PANEL ====================
+        // FOV Controls
+        ImGui::Text("Camera FOV");
+        if (gameMode) {
+            if (ImGui::SliderFloat("Game FOV", &gameFOV, 10.0f, 120.0f)) {
+                camera.updateMatrix(gameFOV, 0.1f, 1000.0f);
+            }
+        }
+        else {
+            if (ImGui::SliderFloat("Editor FOV", &editorFOV, 10.0f, 120.0f)) {
+                camera.updateMatrix(editorFOV, 0.1f, 1000.0f);
+            }
+        }
         ImGui::Separator();
-        ImGui::Begin("Skybox");
-
-        // ==================== SKY SETTINGS ====================
-        ImGui::Text("🌅 Sky Settings");
-        ImGui::Separator();
-
-        ImGui::Checkbox("Show Skybox", &showSkybox);
-        ImGui::SameLine();
-        if (ImGui::Button("Reset Sky")) {
-            selectedSky = 0;
-            useCustomSky = false;
-            customTopColor = glm::vec3(0.2f, 0.4f, 0.8f);
-            customHorizonColor = glm::vec3(0.6f, 0.7f, 0.9f);
-            customBottomColor = glm::vec3(0.4f, 0.5f, 0.6f);
-            customSunColor = glm::vec3(1.0f, 0.9f, 0.6f);
-            customSunDirection = glm::vec3(0.5f, -0.2f, 0.3f);
-            customSunIntensity = 1.0f;
-            customCloudDensity = 1.5f;
-            customCloudOpacity = 0.3f;
-        }
-
-        // ==================== PRESETS ====================
-        if (ImGui::CollapsingHeader("Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
-            static const char* skyNames[] = {
-                "Day (Blue Sky)",
-                "Sunset",
-                "Golden Hour",
-                "Night",
-                "Space/Sci-Fi",
-                "Cyberpunk"
-            };
-
-            struct SkyPreset {
-                glm::vec3 top;
-                glm::vec3 horizon;
-                glm::vec3 bottom;
-                glm::vec3 sunColor;
-                glm::vec3 sunDir;
-                float sunIntensity;
-                float cloudDensity;
-                float cloudOpacity;
-            };
-
-            static std::vector<SkyPreset> skyPresets = {
-                // Day
-                { glm::vec3(0.2f, 0.4f, 0.8f), glm::vec3(0.6f, 0.7f, 0.9f), glm::vec3(0.4f, 0.5f, 0.6f),
-                  glm::vec3(1.0f, 0.9f, 0.6f), glm::vec3(0.5f, -0.2f, 0.3f), 1.0f, 1.5f, 0.3f },
-                  // Sunset
-                  { glm::vec3(0.1f, 0.2f, 0.5f), glm::vec3(0.9f, 0.5f, 0.2f), glm::vec3(0.3f, 0.2f, 0.1f),
-                    glm::vec3(1.0f, 0.6f, 0.2f), glm::vec3(0.3f, -0.4f, 0.2f), 1.2f, 2.0f, 0.4f },
-                    // Golden Hour
-                    { glm::vec3(0.3f, 0.5f, 0.8f), glm::vec3(0.9f, 0.7f, 0.3f), glm::vec3(0.5f, 0.3f, 0.1f),
-                      glm::vec3(1.0f, 0.8f, 0.3f), glm::vec3(0.4f, -0.3f, 0.2f), 1.5f, 1.0f, 0.2f },
-                      // Night
-                      { glm::vec3(0.02f, 0.02f, 0.05f), glm::vec3(0.1f, 0.1f, 0.15f), glm::vec3(0.05f, 0.05f, 0.08f),
-                        glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.5f, 0.0f), 0.0f, 0.5f, 0.1f },
-                        // Space
-                        { glm::vec3(0.01f, 0.01f, 0.05f), glm::vec3(0.2f, 0.1f, 0.3f), glm::vec3(0.05f, 0.02f, 0.1f),
-                          glm::vec3(0.8f, 0.6f, 0.4f), glm::vec3(0.2f, -0.6f, 0.1f), 0.8f, 0.3f, 0.05f },
-                          // Cyberpunk
-                          { glm::vec3(0.8f, 0.1f, 0.5f), glm::vec3(0.1f, 0.2f, 0.8f), glm::vec3(0.0f, 0.0f, 0.1f),
-                            glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.3f, 0.0f), 0.0f, 0.8f, 0.2f }
-            };
-
-            if (ImGui::Combo("Preset", &selectedSky, skyNames, IM_ARRAYSIZE(skyNames))) {
-                customTopColor = skyPresets[selectedSky].top;
-                customHorizonColor = skyPresets[selectedSky].horizon;
-                customBottomColor = skyPresets[selectedSky].bottom;
-                customSunColor = skyPresets[selectedSky].sunColor;
-                customSunDirection = skyPresets[selectedSky].sunDir;
-                customSunIntensity = skyPresets[selectedSky].sunIntensity;
-                customCloudDensity = skyPresets[selectedSky].cloudDensity;
-                customCloudOpacity = skyPresets[selectedSky].cloudOpacity;
-            }
-            ImGui::Checkbox("Custom Mode", &useCustomSky);
-        }
-
-        // ==================== CUSTOM SKY COLORS ====================
-        if (useCustomSky) {
-            if (ImGui::CollapsingHeader("Custom Sky Colors", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::ColorEdit3("Top Color", &customTopColor[0]);
-                ImGui::ColorEdit3("Horizon Color", &customHorizonColor[0]);
-                ImGui::ColorEdit3("Bottom Color", &customBottomColor[0]);
-            }
-
-            // ==================== SUN SETTINGS ====================
-            if (ImGui::CollapsingHeader("Sun Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::ColorEdit3("Sun Color", &customSunColor[0]);
-                ImGui::DragFloat3("Sun Direction", &customSunDirection[0], 0.05f, -1.0f, 1.0f);
-                ImGui::SliderFloat("Sun Intensity", &customSunIntensity, 0.0f, 2.0f);
-            }
-
-            // ==================== CLOUD SETTINGS ====================
-            if (ImGui::CollapsingHeader("Cloud Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::SliderFloat("Cloud Density", &customCloudDensity, 0.0f, 4.0f);
-                ImGui::SliderFloat("Cloud Opacity", &customCloudOpacity, 0.0f, 1.0f);
-            }
-        }
-
-        ImGui::End(); // Skybox window
 
         // Add Object
         if (ImGui::CollapsingHeader("Add Object")) {
@@ -561,9 +513,16 @@ int main()
             auto& entity = entities[selectedEntity];
             ImGui::Separator();
             ImGui::Text("Selected: %d", selectedEntity);
-            ImGui::DragFloat3("Position", &entity.position.x, 0.1f);
-            ImGui::DragFloat3("Rotation (deg)", &entity.rotation.x, 1.0f);
-            ImGui::DragFloat3("Scale", &entity.scale.x, 0.05f);
+
+            bool changed = false;
+            if (ImGui::DragFloat3("Position", &entity.position.x, 0.1f)) changed = true;
+            if (ImGui::DragFloat3("Rotation (deg)", &entity.rotation.x, 1.0f)) changed = true;
+            if (ImGui::DragFloat3("Scale", &entity.scale.x, 0.05f)) changed = true;
+
+            if (changed && ImGui::IsItemDeactivatedAfterEdit()) {
+                pushUndo();
+            }
+
             if (ImGui::Button("Delete")) {
                 pushUndo();
                 entities.erase(entities.begin() + selectedEntity);
@@ -573,11 +532,225 @@ int main()
             const char* typeNames[] = { "Static", "Player", "Ball" };
             int typeIndex = static_cast<int>(entity.type);
             if (ImGui::Combo("Type", &typeIndex, typeNames, 3)) {
+                pushUndo();
                 entity.type = static_cast<EntityType>(typeIndex);
             }
         }
 
         ImGui::End();
+
+
+        // ==================== CONTENT BROWSER (ListBox Version) ====================
+        ImGui::Begin("Content Browser", nullptr, ImGuiWindowFlags_NoCollapse);
+
+        ImGui::Text("📁 Models Folder");
+
+        if (ImGui::Button("🔄 Refresh Models")) {
+            modelFiles = scanModelsFolder("models/");
+            std::cout << "Found " << modelFiles.size() << " model files." << std::endl;
+        }
+
+        // Convert modelFiles to char* array for ListBox
+        static std::vector<const char*> modelNames;
+        modelNames.clear();
+        for (const auto& path : modelFiles) {
+            modelNames.push_back(fs::path(path).filename().string().c_str());
+        }
+
+        static int selectedIndex = -1;
+        if (ImGui::BeginChild("ModelList", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 3), 0)) {
+            if (modelFiles.empty()) {
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "No models found. Click Refresh.");
+            }
+            else {
+                for (int i = 0; i < (int)modelFiles.size(); ++i) {
+                    const auto& filePath = modelFiles[i];
+                    std::string fileName = fs::path(filePath).filename().string();
+
+                    ImGui::PushID(i);
+                    bool isSelected = (selectedModelPath == filePath);
+
+                    if (ImGui::Selectable(fileName.c_str(), isSelected)) {
+                        selectedModelPath = filePath;
+                        std::cout << "📄 Selected: " << fileName << std::endl;
+                    }
+
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Path: %s", filePath.c_str());
+                    }
+
+                    ImGui::PopID();
+                }
+            }
+        }
+        ImGui::EndChild();
+
+        if (!selectedModelPath.empty()) {
+            ImGui::Text("Selected: %s", fs::path(selectedModelPath).filename().string().c_str());
+
+            if (ImGui::Button("📥 Import Selected Model")) {
+                std::string normalizedPath = selectedModelPath;
+                std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
+
+                std::cout << "🔄 Importing: " << normalizedPath << std::endl;
+
+                int existingIndex = -1;
+                for (int i = 0; i < modelPaths.size(); ++i) {
+                    if (modelPaths[i] == normalizedPath) {
+                        existingIndex = i;
+                        break;
+                    }
+                }
+
+                Model* modelToUse = nullptr;
+                bool success = true;
+
+                if (existingIndex != -1) {
+                    modelToUse = loadedModels[existingIndex];
+                    std::cout << "♻️ Reusing existing model: " << normalizedPath << std::endl;
+                }
+                else {
+                    if (!fs::exists(normalizedPath)) {
+                        std::cout << "❌ File not found: " << normalizedPath << std::endl;
+                        selectedModelPath = "";
+                        success = false;
+                    }
+                    else {
+                        Model* newModel = new Model(normalizedPath.c_str());
+                        if (newModel) {
+                            loadedModels.push_back(newModel);
+                            modelPaths.push_back(normalizedPath);
+                            modelToUse = newModel;
+                            std::cout << "✅ Loaded new model: " << normalizedPath << std::endl;
+                        }
+                        else {
+                            std::cout << "❌ Failed to load model: " << normalizedPath << std::endl;
+                            selectedModelPath = "";
+                            success = false;
+                        }
+                    }
+                }
+
+                if (success && modelToUse != nullptr) {
+                    pushUndo();
+                    entities.push_back(EditorEntity{
+                        modelToUse,
+                        normalizedPath,
+                        glm::vec3(0, 0, 0),
+                        glm::vec3(0, 0, 0),
+                        glm::vec3(1, 1, 1),
+                        EntityType::Static,
+                        glm::vec3(0)
+                        });
+                    std::cout << "✅ Added new entity with model: " << normalizedPath << std::endl;
+                    selectedModelPath = "";
+                }
+                else {
+                    // If we failed, just clear the selection
+                    selectedModelPath = "";
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                selectedModelPath = "";
+            }
+        }
+        else {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Select a model from the list above");
+        }
+
+        ImGui::End(); // Content Browser
+
+        // ==================== SKYBOX WINDOW ====================
+        ImGui::Begin("Skybox");
+
+        ImGui::Text("🌅 Sky Settings");
+        ImGui::Separator();
+
+        ImGui::Checkbox("Show Skybox", &showSkybox);
+        ImGui::SameLine();
+        if (ImGui::Button("Reset Sky")) {
+            selectedSky = 0;
+            useCustomSky = false;
+            customTopColor = glm::vec3(0.2f, 0.4f, 0.8f);
+            customHorizonColor = glm::vec3(0.6f, 0.7f, 0.9f);
+            customBottomColor = glm::vec3(0.4f, 0.5f, 0.6f);
+            customSunColor = glm::vec3(1.0f, 0.9f, 0.6f);
+            customSunDirection = glm::vec3(0.5f, -0.2f, 0.3f);
+            customSunIntensity = 1.0f;
+            customCloudDensity = 1.5f;
+            customCloudOpacity = 0.3f;
+        }
+
+        if (ImGui::CollapsingHeader("Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
+            static const char* skyNames[] = {
+                "Day (Blue Sky)",
+                "Sunset",
+                "Golden Hour",
+                "Night",
+                "Space/Sci-Fi",
+                "Cyberpunk"
+            };
+
+            struct SkyPreset {
+                glm::vec3 top;
+                glm::vec3 horizon;
+                glm::vec3 bottom;
+                glm::vec3 sunColor;
+                glm::vec3 sunDir;
+                float sunIntensity;
+                float cloudDensity;
+                float cloudOpacity;
+            };
+
+            static std::vector<SkyPreset> skyPresets = {
+                { glm::vec3(0.2f, 0.4f, 0.8f), glm::vec3(0.6f, 0.7f, 0.9f), glm::vec3(0.4f, 0.5f, 0.6f),
+                  glm::vec3(1.0f, 0.9f, 0.6f), glm::vec3(0.5f, -0.2f, 0.3f), 1.0f, 1.5f, 0.3f },
+                { glm::vec3(0.1f, 0.2f, 0.5f), glm::vec3(0.9f, 0.5f, 0.2f), glm::vec3(0.3f, 0.2f, 0.1f),
+                  glm::vec3(1.0f, 0.6f, 0.2f), glm::vec3(0.3f, -0.4f, 0.2f), 1.2f, 2.0f, 0.4f },
+                { glm::vec3(0.3f, 0.5f, 0.8f), glm::vec3(0.9f, 0.7f, 0.3f), glm::vec3(0.5f, 0.3f, 0.1f),
+                  glm::vec3(1.0f, 0.8f, 0.3f), glm::vec3(0.4f, -0.3f, 0.2f), 1.5f, 1.0f, 0.2f },
+                { glm::vec3(0.02f, 0.02f, 0.05f), glm::vec3(0.1f, 0.1f, 0.15f), glm::vec3(0.05f, 0.05f, 0.08f),
+                  glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.5f, 0.0f), 0.0f, 0.5f, 0.1f },
+                { glm::vec3(0.01f, 0.01f, 0.05f), glm::vec3(0.2f, 0.1f, 0.3f), glm::vec3(0.05f, 0.02f, 0.1f),
+                  glm::vec3(0.8f, 0.6f, 0.4f), glm::vec3(0.2f, -0.6f, 0.1f), 0.8f, 0.3f, 0.05f },
+                { glm::vec3(0.8f, 0.1f, 0.5f), glm::vec3(0.1f, 0.2f, 0.8f), glm::vec3(0.0f, 0.0f, 0.1f),
+                  glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.3f, 0.0f), 0.0f, 0.8f, 0.2f }
+            };
+
+            if (ImGui::Combo("Preset", &selectedSky, skyNames, IM_ARRAYSIZE(skyNames))) {
+                customTopColor = skyPresets[selectedSky].top;
+                customHorizonColor = skyPresets[selectedSky].horizon;
+                customBottomColor = skyPresets[selectedSky].bottom;
+                customSunColor = skyPresets[selectedSky].sunColor;
+                customSunDirection = skyPresets[selectedSky].sunDir;
+                customSunIntensity = skyPresets[selectedSky].sunIntensity;
+                customCloudDensity = skyPresets[selectedSky].cloudDensity;
+                customCloudOpacity = skyPresets[selectedSky].cloudOpacity;
+            }
+            ImGui::Checkbox("Custom Mode", &useCustomSky);
+        }
+
+        if (useCustomSky) {
+            if (ImGui::CollapsingHeader("Custom Sky Colors", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::ColorEdit3("Top Color", &customTopColor[0]);
+                ImGui::ColorEdit3("Horizon Color", &customHorizonColor[0]);
+                ImGui::ColorEdit3("Bottom Color", &customBottomColor[0]);
+            }
+
+            if (ImGui::CollapsingHeader("Sun Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::ColorEdit3("Sun Color", &customSunColor[0]);
+                ImGui::DragFloat3("Sun Direction", &customSunDirection[0], 0.05f, -1.0f, 1.0f);
+                ImGui::SliderFloat("Sun Intensity", &customSunIntensity, 0.0f, 2.0f);
+            }
+
+            if (ImGui::CollapsingHeader("Cloud Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderFloat("Cloud Density", &customCloudDensity, 0.0f, 4.0f);
+                ImGui::SliderFloat("Cloud Opacity", &customCloudOpacity, 0.0f, 1.0f);
+            }
+        }
+
+        ImGui::End(); // Skybox window
 
         // ==================== OVERWRITE / RENAME POPUPS ====================
         if (showOverwriteWarning) {
@@ -624,7 +797,6 @@ int main()
             }
             ImGui::EndPopup();
         }
-
 
         // ==================== COMPUTE LIGHT SPACE MATRIX ====================
         glm::vec3 lightPosWorld = -lightDir * 20.0f;
@@ -682,7 +854,6 @@ int main()
 
         deferredLightingShader.Activate();
 
-        // Bind G-Buffer textures
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gPosition); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gPosition"), 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gNormal); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gNormal"), 1);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gColor); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gColor"), 2);
@@ -690,12 +861,10 @@ int main()
         glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, whiteTexture); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "ssao"), 4);
         glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, depthMap); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "shadowMap"), 5);
 
-        // Camera uniforms
         glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "camPos"), camera.Position.x, camera.Position.y, camera.Position.z);
         glUniformMatrix4fv(glGetUniformLocation(deferredLightingShader.ID, "viewMatrix"), 1, GL_FALSE, glm::value_ptr(viewMatrix));
         glUniformMatrix4fv(glGetUniformLocation(deferredLightingShader.ID, "inverseViewMatrix"), 1, GL_FALSE, glm::value_ptr(inverseView));
 
-        // Light uniforms
         glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightDir"), 1, glm::value_ptr(lightDir));
         glUniform4fv(glGetUniformLocation(deferredLightingShader.ID, "lightColor"), 1, glm::value_ptr(lightColor));
         glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightPos"), 1, glm::value_ptr(lightPos));
@@ -704,11 +873,8 @@ int main()
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "exposure"), exposure);
         glUniformMatrix4fv(glGetUniformLocation(deferredLightingShader.ID, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
 
-        // ==================== SKY UNIFORMS (FIXED) ====================
-        // Pass showSkybox
         glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "showSkybox"), showSkybox ? 1 : 0);
 
-        // Pass sky colors (use custom or preset)
         glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyTopColor"),
             customTopColor.x, customTopColor.y, customTopColor.z);
         glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyHorizonColor"),
@@ -716,7 +882,6 @@ int main()
         glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyBottomColor"),
             customBottomColor.x, customBottomColor.y, customBottomColor.z);
 
-        // Pass sun settings
         glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "sunColor"),
             customSunColor.x, customSunColor.y, customSunColor.z);
         glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "sunDirection"),
@@ -724,7 +889,6 @@ int main()
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "sunIntensity"),
             customSunIntensity);
 
-        // Pass cloud settings
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "cloudDensity"),
             customCloudDensity);
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "cloudOpacity"),
@@ -735,7 +899,6 @@ int main()
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glEnable(GL_DEPTH_TEST);
 
-        // ==================== IMGUI RENDER ====================
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
@@ -743,8 +906,6 @@ int main()
         glfwPollEvents();
     }
 
-    // Cleanup
     for (auto* model : loadedModels) delete model;
-
     return 0;
 }
