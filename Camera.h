@@ -33,6 +33,7 @@ class Camera
 
 		Camera(int width, int height, glm::vec3 position);
 		
+		glm::mat4 GetViewMatrix() const { return glm::lookAt(Position, Position + Orientation, Up); }
 		// Updates and exports the camera matrix to the Vertex Shader
 		void updateMatrix(float FOVdeg, float nearPlane, float farPlane);
 		void Matrix(Shader& shader, const char* uniform);

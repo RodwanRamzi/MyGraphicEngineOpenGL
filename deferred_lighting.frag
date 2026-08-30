@@ -13,14 +13,31 @@ uniform sampler2D shadowMap;
 uniform sampler2D ssao;
 
 uniform vec3 camPos;
+uniform vec3 viewPos;
+uniform mat4 viewMatrix;
+uniform mat4 inverseViewMatrix;
 uniform vec4 lightColor;
 uniform vec3 lightDir;
 uniform vec3 lightPos;
 uniform vec3 lightPos2;
 uniform mat4 lightSpaceMatrix;
 
+
 uniform float saturation;
 uniform float exposure;
+
+// ==================== SKY UNIFORMS ====================
+uniform bool showSkybox;
+uniform vec3 skyTopColor;
+uniform vec3 skyHorizonColor;
+uniform vec3 skyBottomColor;
+uniform vec3 sunColor;
+uniform vec3 sunDirection;
+uniform float sunIntensity;
+uniform float cloudDensity;
+uniform float cloudOpacity;
+uniform bool useCustomSky;
+
 
 // ==================== PBR FUNCTIONS ====================
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
@@ -69,6 +86,98 @@ float ShadowCalculation(vec3 fragPos, vec3 normal) {
     return shadow / 9.0;
 }
 
+// ==================== SUN ====================
+vec3 addSun(vec3 worldViewDir, vec3 skyColor) {
+    // Use the uniform sun direction (NOT hardcoded)
+    vec3 sunDir = normalize(sunDirection);
+    
+    // Compute angle between view direction and sun direction
+    float sunAngle = dot(worldViewDir, sunDir);
+    
+    // Sun size and glow
+    float sunSize = 0.998;
+    float glowSize = 0.98;
+    
+    // Sun disk
+    float sunIntensityVal = smoothstep(sunSize, 1.0, sunAngle);
+    
+    // Glow around sun
+    float glowIntensity = smoothstep(glowSize, 0.99, sunAngle) * 0.5;
+    
+    // Use the uniform sun color and intensity
+    vec3 result = skyColor;
+    result += sunColor * sunIntensityVal * sunIntensity;
+    result += sunColor * 0.7 * glowIntensity * sunIntensity * 0.5;
+    
+    return result;
+}
+
+// ==================== CLOUDS ====================
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float fbm(vec2 p) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    for (int i = 0; i < 4; i++) {
+        vec2 q = floor(p * frequency);
+        vec2 r = fract(p * frequency);
+        float a = hash(q);
+        float b = hash(q + vec2(1.0, 0.0));
+        float c = hash(q + vec2(0.0, 1.0));
+        float d = hash(q + vec2(1.0, 1.0));
+        vec2 u = r * r * (3.0 - 2.0 * r);
+        float noise = mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+        value += amplitude * noise;
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+    return value;
+}
+
+vec3 addClouds(vec3 worldViewDir, vec3 skyColor) {
+    // Cloud position in world space
+    vec2 cloudUV = worldViewDir.xz / (worldViewDir.y + 0.1) * 0.5 + vec2(0.5);
+    cloudUV += vec2(0.1, 0.2); // Offset for variation
+    
+    // Use the uniform cloud density (NOT hardcoded)
+    float cloudDensityVal = fbm(cloudUV * cloudDensity);
+    cloudDensityVal = smoothstep(0.4, 0.8, cloudDensityVal);
+    
+    // Use the uniform cloud opacity (NOT hardcoded)
+    cloudDensityVal *= cloudOpacity;
+    
+    vec3 cloudColor = mix(vec3(1.0), vec3(0.9, 0.85, 0.8), cloudDensityVal);
+    return mix(skyColor, cloudColor, cloudDensityVal);
+}
+
+vec3 getGradientSky(vec3 viewDir)
+{
+    // Get the Y component of the view direction (up/down)
+    float y = viewDir.y;
+    
+    // Clamp to 0-1 range (0 = horizon, 1 = zenith/top)
+    float skyFactor = clamp(y * 0.5 + 0.5, 0.0, 1.0);
+    
+    // Blend between top, horizon, and bottom colors
+    vec3 skyColor;
+    if (skyFactor > 0.5) {
+        // Top half: blend from horizon to top
+        float t = (skyFactor - 0.5) * 2.0;
+        skyColor = mix(skyHorizonColor, skyTopColor, t);
+    } else {
+        // Bottom half: blend from bottom to horizon
+        float t = skyFactor * 2.0;
+        skyColor = mix(skyBottomColor, skyHorizonColor, t);
+    }
+    
+    return skyColor;
+}
+
+
+
 void main() {
     // Read G-Buffer
     vec3 fragPos = texture(gPosition, TexCoords).rgb;
@@ -78,8 +187,34 @@ void main() {
     
     float metallic = mr.r;
     float roughness = mr.g;
+
+    vec3 viewDir = normalize(viewPos - fragPos);
     
     
+    if (length(fragPos) < 0.001) {
+    // Compute view-space ray direction from screen coordinates
+    vec3 viewDirViewSpace = normalize(vec3(TexCoords * 2.0 - 1.0, -1.0));
+    
+    // Transform to world space using the inverse of the view matrix (not projection)
+    vec3 worldViewDir = normalize((inverseViewMatrix * vec4(viewDirViewSpace, 0.0)).xyz);
+    
+    vec3 skyColor;
+    
+    if (showSkybox) {
+        // Compute sky color using the world-space view direction
+        skyColor = getGradientSky(worldViewDir);
+        skyColor = addSun(worldViewDir, skyColor);
+        skyColor = addClouds(worldViewDir, skyColor);
+    } else {
+        // Solid color background (dark grey/black)
+        skyColor = vec3(0.05, 0.05, 0.08);
+    }
+    
+    FragColor = vec4(skyColor, 1.0);
+    return;
+    }
+
+
     vec3 N = normalize(normal);
     vec3 V = normalize(camPos - fragPos);
     float shadow = (dot(N, -lightDir) > 0.0) ? ShadowCalculation(fragPos, N) : 0.0;

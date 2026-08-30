@@ -18,6 +18,7 @@ public:
 
     Shader(const char* vertexFile, const char* fragmentFile, const char* geometryFile);
 
+
     void Activate();
 
     void Delete();

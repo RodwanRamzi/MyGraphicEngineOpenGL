@@ -14,14 +14,15 @@ namespace fs = std::filesystem;
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 
 // ImGui
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
-const unsigned int width = 1024;
-const unsigned int height = 720;
+const unsigned int width = 1480;
+const unsigned int height = 800;
 
 enum class EntityType { Static, Player, Ball };
 
@@ -188,6 +189,27 @@ int main()
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
     glEnableVertexAttribArray(0);
     glBindVertexArray(0);
+
+    // ==================== SKY SETTINGS ====================
+    bool showSkybox = true;
+    bool useCustomSky = false;
+
+    // Custom sky colors
+    glm::vec3 customTopColor = glm::vec3(0.2f, 0.4f, 0.8f);
+    glm::vec3 customHorizonColor = glm::vec3(0.6f, 0.7f, 0.9f);
+    glm::vec3 customBottomColor = glm::vec3(0.4f, 0.5f, 0.6f);
+
+    // Sun settings
+    glm::vec3 customSunColor = glm::vec3(1.0f, 0.9f, 0.6f);
+    glm::vec3 customSunDirection = glm::vec3(0.5f, -0.2f, 0.3f);
+    float customSunIntensity = 1.0f;
+
+    // Cloud settings
+    float customCloudDensity = 1.5f;
+    float customCloudOpacity = 0.3f;
+
+    // Preset selection
+    static int selectedSky = 0;
 
     // ==================== MODEL LIST ====================
     std::vector<std::string> modelPaths = {
@@ -411,6 +433,101 @@ int main()
         }
         ImGui::Separator();
 
+        // ==================== SKY SETTINGS PANEL ====================
+        ImGui::Separator();
+        ImGui::Text("🌅 Sky Settings");
+
+        // Toggle skybox
+        ImGui::Checkbox("Show Skybox", &showSkybox);
+        ImGui::SameLine();
+        if (ImGui::Button("Reset Sky")) {
+            selectedSky = 0;
+            useCustomSky = false;
+            customTopColor = glm::vec3(0.2f, 0.4f, 0.8f);
+            customHorizonColor = glm::vec3(0.6f, 0.7f, 0.9f);
+            customBottomColor = glm::vec3(0.4f, 0.5f, 0.6f);
+            customSunColor = glm::vec3(1.0f, 0.9f, 0.6f);
+            customSunDirection = glm::vec3(0.5f, -0.2f, 0.3f);
+            customSunIntensity = 1.0f;
+            customCloudDensity = 1.5f;
+            customCloudOpacity = 0.3f;
+        }
+
+        // Sky presets
+        static const char* skyNames[] = {    
+            "Day (Blue Sky)",
+            "Sunset",
+            "Golden Hour",
+            "Night",
+            "Space/Sci-Fi",
+            "Cyberpunk"
+        };
+
+        struct SkyPreset {                  
+            glm::vec3 top;
+            glm::vec3 horizon;
+            glm::vec3 bottom;
+            glm::vec3 sunColor;
+            glm::vec3 sunDir;
+            float sunIntensity;
+            float cloudDensity;
+            float cloudOpacity;
+        };
+
+        static std::vector<SkyPreset> skyPresets = {  
+            // Day
+            { glm::vec3(0.2f, 0.4f, 0.8f), glm::vec3(0.6f, 0.7f, 0.9f), glm::vec3(0.4f, 0.5f, 0.6f),
+              glm::vec3(1.0f, 0.9f, 0.6f), glm::vec3(0.5f, -0.2f, 0.3f), 1.0f, 1.5f, 0.3f },
+              // Sunset
+              { glm::vec3(0.1f, 0.2f, 0.5f), glm::vec3(0.9f, 0.5f, 0.2f), glm::vec3(0.3f, 0.2f, 0.1f),
+                glm::vec3(1.0f, 0.6f, 0.2f), glm::vec3(0.3f, -0.4f, 0.2f), 1.2f, 2.0f, 0.4f },
+                // Golden Hour
+                { glm::vec3(0.3f, 0.5f, 0.8f), glm::vec3(0.9f, 0.7f, 0.3f), glm::vec3(0.5f, 0.3f, 0.1f),
+                  glm::vec3(1.0f, 0.8f, 0.3f), glm::vec3(0.4f, -0.3f, 0.2f), 1.5f, 1.0f, 0.2f },
+                  // Night
+                  { glm::vec3(0.02f, 0.02f, 0.05f), glm::vec3(0.1f, 0.1f, 0.15f), glm::vec3(0.05f, 0.05f, 0.08f),
+                    glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.5f, 0.0f), 0.0f, 0.5f, 0.1f },
+                    // Space
+                    { glm::vec3(0.01f, 0.01f, 0.05f), glm::vec3(0.2f, 0.1f, 0.3f), glm::vec3(0.05f, 0.02f, 0.1f),
+                      glm::vec3(0.8f, 0.6f, 0.4f), glm::vec3(0.2f, -0.6f, 0.1f), 0.8f, 0.3f, 0.05f },
+                      // Cyberpunk
+                      { glm::vec3(0.8f, 0.1f, 0.5f), glm::vec3(0.1f, 0.2f, 0.8f), glm::vec3(0.0f, 0.0f, 0.1f),
+                        glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.3f, 0.0f), 0.0f, 0.8f, 0.2f }
+        };
+
+        if (!useCustomSky) {
+            if (ImGui::Combo("Preset", &selectedSky, skyNames, IM_ARRAYSIZE(skyNames))) {
+                customTopColor = skyPresets[selectedSky].top;
+                customHorizonColor = skyPresets[selectedSky].horizon;
+                customBottomColor = skyPresets[selectedSky].bottom;
+                customSunColor = skyPresets[selectedSky].sunColor;
+                customSunDirection = skyPresets[selectedSky].sunDir;
+                customSunIntensity = skyPresets[selectedSky].sunIntensity;
+                customCloudDensity = skyPresets[selectedSky].cloudDensity;
+                customCloudOpacity = skyPresets[selectedSky].cloudOpacity;
+            }
+        }
+        ImGui::Checkbox("Custom Mode", &useCustomSky);
+
+        if (useCustomSky) {
+            ImGui::Text("🎨 Custom Sky Colors");
+            ImGui::ColorEdit3("Top Color", &customTopColor[0]);
+            ImGui::ColorEdit3("Horizon Color", &customHorizonColor[0]);
+            ImGui::ColorEdit3("Bottom Color", &customBottomColor[0]);
+
+            ImGui::Separator();
+            ImGui::Text("☀️ Sun Settings");
+            ImGui::ColorEdit3("Sun Color", &customSunColor[0]);
+            ImGui::DragFloat3("Sun Direction", &customSunDirection[0], 0.05f, -1.0f, 1.0f);
+            ImGui::SliderFloat("Sun Intensity", &customSunIntensity, 0.0f, 2.0f);
+
+            ImGui::Separator();
+            ImGui::Text("☁️ Cloud Settings");
+            ImGui::SliderFloat("Cloud Density", &customCloudDensity, 0.0f, 4.0f);
+            ImGui::SliderFloat("Cloud Opacity", &customCloudOpacity, 0.0f, 1.0f);
+        }
+        ImGui::Separator();
+
         // Add Object
         if (ImGui::CollapsingHeader("Add Object")) {
             for (int i = 0; i < modelPaths.size(); ++i) {
@@ -500,6 +617,7 @@ int main()
             ImGui::EndPopup();
         }
 
+
         // ==================== COMPUTE LIGHT SPACE MATRIX ====================
         glm::vec3 lightPosWorld = -lightDir * 20.0f;
         glm::mat4 lightProjection = glm::ortho(-10.0f, 10.0f, -10.0f, 10.0f, 0.1f, 30.0f);
@@ -533,6 +651,8 @@ int main()
         gBufferShader.Activate();
         glUniformMatrix4fv(glGetUniformLocation(gBufferShader.ID, "camMatrix"), 1, GL_FALSE, glm::value_ptr(camera.cameraMatrix));
         glUniform3f(glGetUniformLocation(gBufferShader.ID, "camPos"), camera.Position.x, camera.Position.y, camera.Position.z);
+        glm::mat4 viewMatrix = camera.GetViewMatrix();
+        glm::mat4 inverseView = glm::inverse(viewMatrix);
         glUniform1i(glGetUniformLocation(gBufferShader.ID, "useNormalMap"), 1);
         glUniform1i(glGetUniformLocation(gBufferShader.ID, "useMetallicRoughness"), 1);
         glUniform1i(glGetUniformLocation(gBufferShader.ID, "useHeightMap"), 1);
@@ -554,23 +674,53 @@ int main()
 
         deferredLightingShader.Activate();
 
+        // Bind G-Buffer textures
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gPosition); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gPosition"), 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gNormal); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gNormal"), 1);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gColor); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gColor"), 2);
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gMetallicRoughness); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gMetallicRoughness"), 3);
         glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, whiteTexture); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "ssao"), 4);
-        // Bind real shadow map
         glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, depthMap); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "shadowMap"), 5);
 
+        // Camera uniforms
         glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "camPos"), camera.Position.x, camera.Position.y, camera.Position.z);
+        glUniformMatrix4fv(glGetUniformLocation(deferredLightingShader.ID, "viewMatrix"), 1, GL_FALSE, glm::value_ptr(viewMatrix));
+        glUniformMatrix4fv(glGetUniformLocation(deferredLightingShader.ID, "inverseViewMatrix"), 1, GL_FALSE, glm::value_ptr(inverseView));
+
+        // Light uniforms
         glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightDir"), 1, glm::value_ptr(lightDir));
         glUniform4fv(glGetUniformLocation(deferredLightingShader.ID, "lightColor"), 1, glm::value_ptr(lightColor));
         glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightPos"), 1, glm::value_ptr(lightPos));
         glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightPos2"), 1, glm::value_ptr(lightPos2));
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "saturation"), saturation);
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "exposure"), exposure);
-        // Pass real light space matrix
         glUniformMatrix4fv(glGetUniformLocation(deferredLightingShader.ID, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+
+        // ==================== SKY UNIFORMS (FIXED) ====================
+        // Pass showSkybox
+        glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "showSkybox"), showSkybox ? 1 : 0);
+
+        // Pass sky colors (use custom or preset)
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyTopColor"),
+            customTopColor.x, customTopColor.y, customTopColor.z);
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyHorizonColor"),
+            customHorizonColor.x, customHorizonColor.y, customHorizonColor.z);
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyBottomColor"),
+            customBottomColor.x, customBottomColor.y, customBottomColor.z);
+
+        // Pass sun settings
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "sunColor"),
+            customSunColor.x, customSunColor.y, customSunColor.z);
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "sunDirection"),
+            customSunDirection.x, customSunDirection.y, customSunDirection.z);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "sunIntensity"),
+            customSunIntensity);
+
+        // Pass cloud settings
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "cloudDensity"),
+            customCloudDensity);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "cloudOpacity"),
+            customCloudOpacity);
 
         glDisable(GL_DEPTH_TEST);
         glBindVertexArray(rectVAO);
