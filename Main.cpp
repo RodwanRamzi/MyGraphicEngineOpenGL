@@ -435,6 +435,7 @@ int main()
 
         // ==================== SKY SETTINGS PANEL ====================
         ImGui::Separator();
+        ImGui::Begin("Skybox");
         ImGui::Text("🌅 Sky Settings");
 
         // Toggle skybox
@@ -526,7 +527,7 @@ int main()
             ImGui::SliderFloat("Cloud Density", &customCloudDensity, 0.0f, 4.0f);
             ImGui::SliderFloat("Cloud Opacity", &customCloudOpacity, 0.0f, 1.0f);
         }
-        ImGui::Separator();
+        ImGui::End();
 
         // Add Object
         if (ImGui::CollapsingHeader("Add Object")) {
