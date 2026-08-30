@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub LFS](https://img.shields.io/badge/Git_LFS-enabled-orange.svg)](https://git-lfs.com)
 
-A **custom OpenGL 4.6 game engine** built from scratch featuring **Deferred Shading**, **Physically Based Rendering (PBR)**, and a fully functional **Level Editor**. No commercial engines—just pure C++, OpenGL, and thousands of hours of dedication.
+A **custom OpenGL 4.6 game engine** built from scratch featuring **Deferred Shading**, **Physically Based Rendering (PBR)**, and a fully functional **Level Editor**. No commercial engines—just pure C++, OpenGL, and an unwavering commitment to learning.
 
 <p align="center">
   <img src="screenshots/screenshot2.png" alt="Engine Screenshot" width="800"/>
