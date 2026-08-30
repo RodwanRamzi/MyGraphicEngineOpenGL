@@ -71,6 +71,64 @@ std::vector<std::string> scanModelsFolder(const std::string& folderPath) {
     return modelFiles;
 }
 
+// ==================== FRUSTUM CULLING ====================
+struct Frustum {
+    glm::vec4 planes[6]; // Left, Right, Bottom, Top, Near, Far
+};
+
+Frustum extractFrustum(const glm::mat4& viewProj) {
+    Frustum frustum;
+
+    // Left plane
+    frustum.planes[0] = glm::vec4(viewProj[0][3] + viewProj[0][0],
+        viewProj[1][3] + viewProj[1][0],
+        viewProj[2][3] + viewProj[2][0],
+        viewProj[3][3] + viewProj[3][0]);
+    // Right plane
+    frustum.planes[1] = glm::vec4(viewProj[0][3] - viewProj[0][0],
+        viewProj[1][3] - viewProj[1][0],
+        viewProj[2][3] - viewProj[2][0],
+        viewProj[3][3] - viewProj[3][0]);
+    // Bottom plane
+    frustum.planes[2] = glm::vec4(viewProj[0][3] + viewProj[0][1],
+        viewProj[1][3] + viewProj[1][1],
+        viewProj[2][3] + viewProj[2][1],
+        viewProj[3][3] + viewProj[3][1]);
+    // Top plane
+    frustum.planes[3] = glm::vec4(viewProj[0][3] - viewProj[0][1],
+        viewProj[1][3] - viewProj[1][1],
+        viewProj[2][3] - viewProj[2][1],
+        viewProj[3][3] - viewProj[3][1]);
+    // Near plane
+    frustum.planes[4] = glm::vec4(viewProj[0][3] + viewProj[0][2],
+        viewProj[1][3] + viewProj[1][2],
+        viewProj[2][3] + viewProj[2][2],
+        viewProj[3][3] + viewProj[3][2]);
+    // Far plane
+    frustum.planes[5] = glm::vec4(viewProj[0][3] - viewProj[0][2],
+        viewProj[1][3] - viewProj[1][2],
+        viewProj[2][3] - viewProj[2][2],
+        viewProj[3][3] - viewProj[3][2]);
+
+    // Normalize all planes
+    for (int i = 0; i < 6; i++) {
+        float length = glm::length(glm::vec3(frustum.planes[i]));
+        frustum.planes[i] /= length;
+    }
+
+    return frustum;
+}
+
+bool isSphereInFrustum(const Frustum& frustum, const glm::vec3& center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        float distance = glm::dot(frustum.planes[i], glm::vec4(center, 1.0f));
+        if (distance < -radius) {
+            return false; // Outside
+        }
+    }
+    return true; // Inside or intersecting
+}
+
 int main()
 {
     glfwInit();
@@ -95,6 +153,17 @@ int main()
     // ==================== CAMERA ====================
     Camera camera(width, height, glm::vec3(3.0f, 2.0f, 6.0f));
     camera.Orientation = glm::normalize(glm::vec3(-3.0f, -2.0f, -6.0f));
+
+    // ==================== FRUSTUM CULLING ====================
+    bool enableFrustumCulling = true;
+
+    // ==================== FPS COUNTER ====================
+    float deltaTime = 0.0f;
+    float lastFrameTime = 0.0f;
+    float fps = 0.0f;
+    float fpsCounter = 0.0f;
+    float fpsTime = 0.0f;
+    bool showFPS = true;
 
     // ==================== IMGUI ====================
     IMGUI_CHECKVERSION();
@@ -421,6 +490,22 @@ int main()
         else {
             camera.Inputs(window);
             camera.updateMatrix(editorFOV, 0.1f, 1000.0f);
+            // ==================== FPS CALCULATION ====================
+            float currentFrameTime = glfwGetTime();
+            deltaTime = currentFrameTime - lastFrameTime;
+            lastFrameTime = currentFrameTime;
+
+            fpsCounter++;
+            fpsTime += deltaTime;
+            if (fpsTime >= 1.0f) {
+                fps = fpsCounter;
+                fpsCounter = 0;
+                fpsTime = 0.0f;
+            }
+            // ==================== COMPUTE VIEW MATRICES ====================
+            glm::mat4 viewMatrix = camera.GetViewMatrix();
+            glm::mat4 inverseView = glm::inverse(viewMatrix);
+
         }
 
         // ==================== IMGUI ====================
@@ -436,6 +521,8 @@ int main()
 
         // ==================== LEVEL EDITOR WINDOW ====================
         ImGui::Begin("Level Editor");
+
+        ImGui::Checkbox("Show FPS", &showFPS);
 
         // File management
         ImGui::InputText("Level Name", levelNameBuffer, sizeof(levelNameBuffer));
@@ -471,6 +558,10 @@ int main()
             gameMode = !gameMode;
             if (!gameMode) entities = copyEntities(savedEntities);
         }
+
+        ImGui::Separator();
+
+        ImGui::Checkbox("Enable Frustum Culling", &enableFrustumCulling);
 
         ImGui::Separator();
 
@@ -543,9 +634,9 @@ int main()
         // ==================== CONTENT BROWSER (ListBox Version) ====================
         ImGui::Begin("Content Browser", nullptr, ImGuiWindowFlags_NoCollapse);
 
-        ImGui::Text("📁 Models Folder");
+        ImGui::Text("Models Folder");
 
-        if (ImGui::Button("🔄 Refresh Models")) {
+        if (ImGui::Button("Refresh Models")) {
             modelFiles = scanModelsFolder("models/");
             std::cout << "Found " << modelFiles.size() << " model files." << std::endl;
         }
@@ -572,7 +663,7 @@ int main()
 
                     if (ImGui::Selectable(fileName.c_str(), isSelected)) {
                         selectedModelPath = filePath;
-                        std::cout << "📄 Selected: " << fileName << std::endl;
+                        std::cout << " Selected: " << fileName << std::endl;
                     }
 
                     if (ImGui::IsItemHovered()) {
@@ -588,11 +679,11 @@ int main()
         if (!selectedModelPath.empty()) {
             ImGui::Text("Selected: %s", fs::path(selectedModelPath).filename().string().c_str());
 
-            if (ImGui::Button("📥 Import Selected Model")) {
+            if (ImGui::Button(" Import Selected Model")) {
                 std::string normalizedPath = selectedModelPath;
                 std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
 
-                std::cout << "🔄 Importing: " << normalizedPath << std::endl;
+                std::cout << " Importing: " << normalizedPath << std::endl;
 
                 int existingIndex = -1;
                 for (int i = 0; i < modelPaths.size(); ++i) {
@@ -607,7 +698,7 @@ int main()
 
                 if (existingIndex != -1) {
                     modelToUse = loadedModels[existingIndex];
-                    std::cout << "♻️ Reusing existing model: " << normalizedPath << std::endl;
+                    std::cout << " Reusing existing model: " << normalizedPath << std::endl;
                 }
                 else {
                     if (!fs::exists(normalizedPath)) {
@@ -621,7 +712,7 @@ int main()
                             loadedModels.push_back(newModel);
                             modelPaths.push_back(normalizedPath);
                             modelToUse = newModel;
-                            std::cout << "✅ Loaded new model: " << normalizedPath << std::endl;
+                            std::cout << " Loaded new model: " << normalizedPath << std::endl;
                         }
                         else {
                             std::cout << "❌ Failed to load model: " << normalizedPath << std::endl;
@@ -642,7 +733,7 @@ int main()
                         EntityType::Static,
                         glm::vec3(0)
                         });
-                    std::cout << "✅ Added new entity with model: " << normalizedPath << std::endl;
+                    std::cout << " Added new entity with model: " << normalizedPath << std::endl;
                     selectedModelPath = "";
                 }
                 else {
@@ -664,7 +755,7 @@ int main()
         // ==================== SKYBOX WINDOW ====================
         ImGui::Begin("Skybox");
 
-        ImGui::Text("🌅 Sky Settings");
+        ImGui::Text("Sky Settings");
         ImGui::Separator();
 
         ImGui::Checkbox("Show Skybox", &showSkybox);
@@ -798,6 +889,23 @@ int main()
             ImGui::EndPopup();
         }
 
+        // ==================== FPS OVERLAY ====================
+        if (showFPS) {
+            ImGui::Begin("Performance", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+
+            // FPS
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "FPS: %.1f", fps);
+
+            // Frame time in milliseconds
+            float frameTimeMS = deltaTime * 1000.0f;
+            ImGui::Text("Frame Time: %.2f ms", frameTimeMS);
+
+            // Entity count
+            ImGui::Text("Entities: %zu", entities.size());
+
+            ImGui::End();
+        }
+
         // ==================== COMPUTE LIGHT SPACE MATRIX ====================
         glm::vec3 lightPosWorld = -lightDir * 20.0f;
         glm::mat4 lightProjection = glm::ortho(-10.0f, 10.0f, -10.0f, 10.0f, 0.1f, 30.0f);
@@ -809,10 +917,24 @@ int main()
         glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
         glClear(GL_DEPTH_BUFFER_BIT);
 
+        // Extract frustum from camera view-projection matrix
+        Frustum frustum = extractFrustum(camera.cameraMatrix);
+
+        glm::mat4 viewMatrix = camera.GetViewMatrix();
+        glm::mat4 inverseView = glm::inverse(viewMatrix);
+
         depthShader.Activate();
         glUniformMatrix4fv(glGetUniformLocation(depthShader.ID, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
 
         for (auto& entity : entities) {
+            // Skip if culling is enabled and entity is outside the frustum
+            if (enableFrustumCulling) {
+                float radius = 1.0f; // Approximate sphere radius (you can make this per-entity)
+                if (!isSphereInFrustum(frustum, entity.position, radius)) {
+                    continue; // Skip drawing this entity
+                }
+            }
+
             glm::mat4 modelMat = glm::mat4(1.0f);
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.x), glm::vec3(1, 0, 0));
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.y), glm::vec3(0, 1, 0));
@@ -828,16 +950,25 @@ int main()
         glViewport(0, 0, width, height);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        // Re-extract frustum (or reuse the same one)
+        Frustum frustum2 = extractFrustum(camera.cameraMatrix);
+
         gBufferShader.Activate();
         glUniformMatrix4fv(glGetUniformLocation(gBufferShader.ID, "camMatrix"), 1, GL_FALSE, glm::value_ptr(camera.cameraMatrix));
         glUniform3f(glGetUniformLocation(gBufferShader.ID, "camPos"), camera.Position.x, camera.Position.y, camera.Position.z);
-        glm::mat4 viewMatrix = camera.GetViewMatrix();
-        glm::mat4 inverseView = glm::inverse(viewMatrix);
         glUniform1i(glGetUniformLocation(gBufferShader.ID, "useNormalMap"), 1);
         glUniform1i(glGetUniformLocation(gBufferShader.ID, "useMetallicRoughness"), 1);
         glUniform1i(glGetUniformLocation(gBufferShader.ID, "useHeightMap"), 1);
 
         for (auto& entity : entities) {
+            // Skip if culling is enabled and entity is outside the frustum
+            if (enableFrustumCulling) {
+                float radius = 1.0f; // Approximate sphere radius
+                if (!isSphereInFrustum(frustum2, entity.position, radius)) {
+                    continue; // Skip drawing this entity
+                }
+            }
+
             glm::mat4 modelMat = glm::mat4(1.0f);
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.x), glm::vec3(1, 0, 0));
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.y), glm::vec3(0, 1, 0));
