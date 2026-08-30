@@ -15,11 +15,14 @@ namespace fs = std::filesystem;
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/random.hpp>
 
 // ImGui
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+
+
 
 const unsigned int width = 1480;
 const unsigned int height = 800;
@@ -61,7 +64,6 @@ std::vector<std::string> scanModelsFolder(const std::string& folderPath) {
             std::string ext = entry.path().extension().string();
             if (ext == ".gltf" || ext == ".glb") {
                 std::string fullPath = entry.path().string();
-                // Normalize: replace backslashes with forward slashes
                 std::replace(fullPath.begin(), fullPath.end(), '\\', '/');
                 modelFiles.push_back(fullPath);
             }
@@ -73,44 +75,37 @@ std::vector<std::string> scanModelsFolder(const std::string& folderPath) {
 
 // ==================== FRUSTUM CULLING ====================
 struct Frustum {
-    glm::vec4 planes[6]; // Left, Right, Bottom, Top, Near, Far
+    glm::vec4 planes[6];
 };
 
 Frustum extractFrustum(const glm::mat4& viewProj) {
     Frustum frustum;
 
-    // Left plane
     frustum.planes[0] = glm::vec4(viewProj[0][3] + viewProj[0][0],
         viewProj[1][3] + viewProj[1][0],
         viewProj[2][3] + viewProj[2][0],
         viewProj[3][3] + viewProj[3][0]);
-    // Right plane
     frustum.planes[1] = glm::vec4(viewProj[0][3] - viewProj[0][0],
         viewProj[1][3] - viewProj[1][0],
         viewProj[2][3] - viewProj[2][0],
         viewProj[3][3] - viewProj[3][0]);
-    // Bottom plane
     frustum.planes[2] = glm::vec4(viewProj[0][3] + viewProj[0][1],
         viewProj[1][3] + viewProj[1][1],
         viewProj[2][3] + viewProj[2][1],
         viewProj[3][3] + viewProj[3][1]);
-    // Top plane
     frustum.planes[3] = glm::vec4(viewProj[0][3] - viewProj[0][1],
         viewProj[1][3] - viewProj[1][1],
         viewProj[2][3] - viewProj[2][1],
         viewProj[3][3] - viewProj[3][1]);
-    // Near plane
     frustum.planes[4] = glm::vec4(viewProj[0][3] + viewProj[0][2],
         viewProj[1][3] + viewProj[1][2],
         viewProj[2][3] + viewProj[2][2],
         viewProj[3][3] + viewProj[3][2]);
-    // Far plane
     frustum.planes[5] = glm::vec4(viewProj[0][3] - viewProj[0][2],
         viewProj[1][3] - viewProj[1][2],
         viewProj[2][3] - viewProj[2][2],
         viewProj[3][3] - viewProj[3][2]);
 
-    // Normalize all planes
     for (int i = 0; i < 6; i++) {
         float length = glm::length(glm::vec3(frustum.planes[i]));
         frustum.planes[i] /= length;
@@ -122,12 +117,12 @@ Frustum extractFrustum(const glm::mat4& viewProj) {
 bool isSphereInFrustum(const Frustum& frustum, const glm::vec3& center, float radius) {
     for (int i = 0; i < 6; i++) {
         float distance = glm::dot(frustum.planes[i], glm::vec4(center, 1.0f));
-        if (distance < -radius) {
-            return false; // Outside
-        }
+        if (distance < -radius) return false;
     }
-    return true; // Inside or intersecting
+    return true;
 }
+
+
 
 int main()
 {
@@ -149,27 +144,16 @@ int main()
     Shader gBufferShader("gBuffer.vert", "gBuffer.frag");
     Shader deferredLightingShader("deferred_lighting.vert", "deferred_lighting.frag");
     Shader depthShader("depth.vert", "depth.frag");
+    Shader ssaoShader("ssao.vert", "ssao.frag");
 
     // ==================== CAMERA ====================
     Camera camera(width, height, glm::vec3(3.0f, 2.0f, 6.0f));
     camera.Orientation = glm::normalize(glm::vec3(-3.0f, -2.0f, -6.0f));
 
-    // ==================== FRUSTUM CULLING ====================
-    bool enableFrustumCulling = true;
-
-    // ==================== FPS COUNTER ====================
-    float deltaTime = 0.0f;
-    float lastFrameTime = 0.0f;
-    float fps = 0.0f;
-    float fpsCounter = 0.0f;
-    float fpsTime = 0.0f;
-    bool showFPS = true;
-
     // ==================== IMGUI ====================
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    /*io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;*/
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 460");
 
@@ -273,6 +257,47 @@ int main()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glBindTexture(GL_TEXTURE_2D, 0);
 
+    // ==================== SSAO SETUP ====================
+    unsigned int ssaoFBO, ssaoColorBuffer;
+    glGenFramebuffers(1, &ssaoFBO);
+    glGenTextures(1, &ssaoColorBuffer);
+    glBindTexture(GL_TEXTURE_2D, ssaoColorBuffer);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, width, height, 0, GL_RED, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssaoColorBuffer, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cout << "SSAO FBO not complete!" << std::endl;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // Noise texture
+    unsigned int noiseTexture;
+    glGenTextures(1, &noiseTexture);
+    glBindTexture(GL_TEXTURE_2D, noiseTexture);
+    std::vector<glm::vec3> noiseData(16);
+    for (unsigned int i = 0; i < 16; i++) {
+        glm::vec3 randomVec = glm::vec3(glm::linearRand(-1.0f, 1.0f), glm::linearRand(-1.0f, 1.0f), 0.0f);
+        randomVec = glm::normalize(randomVec);
+        noiseData[i] = randomVec;
+    }
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 4, 4, 0, GL_RGB, GL_FLOAT, &noiseData[0]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // ==================== SAMPLE KERNEL (STATIC, NOT SCALED BY RADIUS) ====================
+    std::vector<glm::vec3> ssaoSamples(64);
+    for (unsigned int i = 0; i < 64; i++) {
+        glm::vec3 sample = glm::vec3(glm::linearRand(-1.0f, 1.0f), glm::linearRand(-1.0f, 1.0f), glm::linearRand(0.0f, 1.0f));
+        sample = glm::normalize(sample);
+        float scale = (float)i / 64.0f;
+        scale = 0.1f + 0.9f * scale * scale;
+        sample *= scale;
+        ssaoSamples[i] = sample;
+    }
+
     // ==================== GRID ====================
     unsigned int gridVAO, gridVBO;
     glGenVertexArrays(1, &gridVAO);
@@ -294,25 +319,44 @@ int main()
     // ==================== SKY SETTINGS ====================
     bool showSkybox = true;
     bool useCustomSky = false;
-
     glm::vec3 customTopColor = glm::vec3(0.2f, 0.4f, 0.8f);
     glm::vec3 customHorizonColor = glm::vec3(0.6f, 0.7f, 0.9f);
     glm::vec3 customBottomColor = glm::vec3(0.4f, 0.5f, 0.6f);
-
     glm::vec3 customSunColor = glm::vec3(1.0f, 0.9f, 0.6f);
     glm::vec3 customSunDirection = glm::vec3(0.5f, -0.2f, 0.3f);
     float customSunIntensity = 1.0f;
-
     float customCloudDensity = 1.5f;
     float customCloudOpacity = 0.3f;
-
     static int selectedSky = 0;
+
+    // ==================== POST-PROCESSING SETTINGS ====================
+    bool enableSSAO = true;
+    float ssaoRadius = 0.5f;      // kept but not exposed
+    float ssaoBias = 0.025f;      // kept but not exposed
+    float ssaoPower = 2.0f;       // kept but not exposed
+
+    bool enableBloom = true;
+    float bloomThreshold = 0.5f;
+    float bloomIntensity = 0.4f;
+
+    // Color grading controls (with default values for reset)
+    float saturation = 1.0f;
+    float contrast = 1.0f;
+    float gamma = 2.2f;
+    float exposure = 1.5f;
+
+    // ==================== FPS COUNTER ====================
+    float deltaTime = 0.0f;
+    float lastFrameTime = 0.0f;
+    float fps = 0.0f;
+    float fpsCounter = 0.0f;
+    float fpsTime = 0.0f;
+    bool showFPS = true;
+    bool enableFrustumCulling = true;
 
     // ==================== CONTENT BROWSER ====================
     std::vector<std::string> modelFiles;
     std::string selectedModelPath = "";
-
-    // ==================== FOV ====================
     float editorFOV = 75.0f;
     float gameFOV = 65.0f;
 
@@ -321,7 +365,6 @@ int main()
         "models/map/scene.gltf",
         "models/sword/scene.gltf"
     };
-
     std::vector<Model*> loadedModels;
     for (const auto& path : modelPaths) {
         Model* model = new Model(path.c_str());
@@ -332,7 +375,6 @@ int main()
     // ==================== ENTITY LIST ====================
     std::vector<EditorEntity> entities;
     int selectedEntity = -1;
-
     entities.push_back({ loadedModels[0], modelPaths[0], glm::vec3(0.0f, 1.5f, 0.0f), glm::vec3(0.0f, 90.0f, 0.0f), glm::vec3(0.5f) });
 
     // ==================== GAME MODE ====================
@@ -347,7 +389,6 @@ int main()
         undoStack.push_back(copyEntities(entities));
         redoStack.clear();
         };
-
     auto applyUndo = [&]() {
         if (!undoStack.empty()) {
             redoStack.push_back(copyEntities(entities));
@@ -356,7 +397,6 @@ int main()
             selectedEntity = -1;
         }
         };
-
     auto applyRedo = [&]() {
         if (!redoStack.empty()) {
             undoStack.push_back(copyEntities(entities));
@@ -376,7 +416,6 @@ int main()
     bool showRenamePopup = false;
     char newLevelNameBuffer[128] = "";
 
-    // ==================== SAVE / LOAD ====================
     auto saveLevel = [&]() {
         std::ofstream file(levelPath);
         if (!file.is_open()) {
@@ -403,14 +442,12 @@ int main()
         pushUndo();
         entities.clear();
         selectedEntity = -1;
-
         std::string line;
         while (std::getline(file, line)) {
             if (line.empty()) continue;
             std::stringstream ss(line);
             std::string path;
             std::getline(ss, path, '|');
-
             float px, py, pz, rx, ry, rz, sx, sy, sz;
             ss >> px; ss.ignore(); ss >> py; ss.ignore(); ss >> pz;
             ss.ignore();
@@ -429,15 +466,9 @@ int main()
                 ent.position = glm::vec3(px, py, pz);
                 ent.rotation = glm::vec3(rx, ry, rz);
                 ent.scale = glm::vec3(sx, sy, sz);
-
                 int typeInt;
-                if (ss >> typeInt) {
-                    ent.type = static_cast<EntityType>(typeInt);
-                }
-                else {
-                    ent.type = EntityType::Static;
-                }
-
+                if (ss >> typeInt) ent.type = static_cast<EntityType>(typeInt);
+                else ent.type = EntityType::Static;
                 entities.push_back(ent);
             }
         }
@@ -451,14 +482,10 @@ int main()
     glm::vec3 lightPos = glm::vec3(2.0f, 3.0f, 2.0f);
     glm::vec3 lightPos2 = glm::vec3(-2.0f, 2.0f, -1.0f);
 
-    float saturation = 1.0f;
-    float exposure = 1.5f;
-
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 
     // ==================== MAIN LOOP ====================
-    while (!glfwWindowShouldClose(window))
-    {
+    while (!glfwWindowShouldClose(window)) {
         float deltaTime = 0.016f;
 
         // ==================== GAME MODE LOGIC ====================
@@ -490,31 +517,28 @@ int main()
         else {
             camera.Inputs(window);
             camera.updateMatrix(editorFOV, 0.1f, 1000.0f);
-            // ==================== FPS CALCULATION ====================
-            float currentFrameTime = glfwGetTime();
-            deltaTime = currentFrameTime - lastFrameTime;
-            lastFrameTime = currentFrameTime;
-
-            fpsCounter++;
-            fpsTime += deltaTime;
-            if (fpsTime >= 1.0f) {
-                fps = fpsCounter;
-                fpsCounter = 0;
-                fpsTime = 0.0f;
-            }
-            // ==================== COMPUTE VIEW MATRICES ====================
-            glm::mat4 viewMatrix = camera.GetViewMatrix();
-            glm::mat4 inverseView = glm::inverse(viewMatrix);
-
         }
+
+        // ==================== FPS CALCULATION ====================
+        float currentFrameTime = glfwGetTime();
+        deltaTime = currentFrameTime - lastFrameTime;
+        lastFrameTime = currentFrameTime;
+        fpsCounter++;
+        fpsTime += deltaTime;
+        if (fpsTime >= 1.0f) {
+            fps = fpsCounter;
+            fpsCounter = 0;
+            fpsTime = 0.0f;
+        }
+
+        // ==================== VIEW MATRICES ====================
+        glm::mat4 viewMatrix = camera.GetViewMatrix();
+        glm::mat4 inverseView = glm::inverse(viewMatrix);
 
         // ==================== IMGUI ====================
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-
-        /*io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-        ImGui::DockSpaceOverViewport(ImGui::GetMainViewport());*/
 
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z)) applyUndo();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y)) applyRedo();
@@ -523,8 +547,6 @@ int main()
         ImGui::Begin("Level Editor");
 
         ImGui::Checkbox("Show FPS", &showFPS);
-
-        // File management
         ImGui::InputText("Level Name", levelNameBuffer, sizeof(levelNameBuffer));
         levelName = levelNameBuffer;
         levelPath = levelFolder + "/" + levelName + ".txt";
@@ -552,20 +574,16 @@ int main()
         if (ImGui::Button("Redo")) applyRedo();
         ImGui::Separator();
 
-        // Play mode
         if (ImGui::Button(gameMode ? "Back to Editor" : "Play Mode")) {
             if (!gameMode) savedEntities = copyEntities(entities);
             gameMode = !gameMode;
             if (!gameMode) entities = copyEntities(savedEntities);
         }
-
         ImGui::Separator();
 
         ImGui::Checkbox("Enable Frustum Culling", &enableFrustumCulling);
-
         ImGui::Separator();
 
-        // FOV Controls
         ImGui::Text("Camera FOV");
         if (gameMode) {
             if (ImGui::SliderFloat("Game FOV", &gameFOV, 10.0f, 120.0f)) {
@@ -578,6 +596,58 @@ int main()
             }
         }
         ImGui::Separator();
+
+        // ==================== POST-PROCESSING CONTROLS ====================
+        if (ImGui::CollapsingHeader("Post-Processing", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("🎨 Post-Processing Settings");
+            ImGui::Separator();
+
+            // SSAO – only enable/disable
+            ImGui::Checkbox("Enable SSAO", &enableSSAO);
+
+            ImGui::Separator();
+
+            // Color Grading with Reset buttons
+            ImGui::Text("Color Grading");
+
+            // Saturation
+            ImGui::SliderFloat("Saturation", &saturation, 0.0f, 2.0f);
+            ImGui::SameLine();
+            if (ImGui::Button("R##Saturation")) { saturation = 1.0f; }
+
+            // Contrast
+            ImGui::SliderFloat("Contrast", &contrast, 0.5f, 2.0f);
+            ImGui::SameLine();
+            if (ImGui::Button("R##Contrast")) { contrast = 1.0f; }
+
+            // Gamma
+            ImGui::SliderFloat("Gamma", &gamma, 1.0f, 3.0f);
+            ImGui::SameLine();
+            if (ImGui::Button("R##Gamma")) { gamma = 2.2f; }
+
+            // Exposure
+            ImGui::SliderFloat("Exposure", &exposure, 0.0f, 3.0f);
+            ImGui::SameLine();
+            if (ImGui::Button("R##Exposure")) { exposure = 1.5f; }
+
+            ImGui::Separator();
+
+            // Bloom with Reset buttons
+            if (ImGui::CollapsingHeader("Bloom", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Checkbox("Enable Bloom", &enableBloom);
+
+                ImGui::SliderFloat("Threshold", &bloomThreshold, 0.0f, 2.0f);
+                ImGui::SameLine();
+                if (ImGui::Button("R##BloomThreshold")) { bloomThreshold = 0.5f; }
+
+                ImGui::SliderFloat("Intensity", &bloomIntensity, 0.0f, 2.0f);
+                ImGui::SameLine();
+                if (ImGui::Button("R##BloomIntensity")) { bloomIntensity = 0.4f; }
+            }
+
+            ImGui::Separator();
+
+        }
 
         // Add Object
         if (ImGui::CollapsingHeader("Add Object")) {
@@ -630,25 +700,14 @@ int main()
 
         ImGui::End();
 
-
-        // ==================== CONTENT BROWSER (ListBox Version) ====================
+        // ==================== CONTENT BROWSER ====================
         ImGui::Begin("Content Browser", nullptr, ImGuiWindowFlags_NoCollapse);
-
         ImGui::Text("Models Folder");
-
         if (ImGui::Button("Refresh Models")) {
             modelFiles = scanModelsFolder("models/");
             std::cout << "Found " << modelFiles.size() << " model files." << std::endl;
         }
 
-        // Convert modelFiles to char* array for ListBox
-        static std::vector<const char*> modelNames;
-        modelNames.clear();
-        for (const auto& path : modelFiles) {
-            modelNames.push_back(fs::path(path).filename().string().c_str());
-        }
-
-        static int selectedIndex = -1;
         if (ImGui::BeginChild("ModelList", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 3), 0)) {
             if (modelFiles.empty()) {
                 ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "No models found. Click Refresh.");
@@ -657,19 +716,15 @@ int main()
                 for (int i = 0; i < (int)modelFiles.size(); ++i) {
                     const auto& filePath = modelFiles[i];
                     std::string fileName = fs::path(filePath).filename().string();
-
                     ImGui::PushID(i);
                     bool isSelected = (selectedModelPath == filePath);
-
                     if (ImGui::Selectable(fileName.c_str(), isSelected)) {
                         selectedModelPath = filePath;
                         std::cout << " Selected: " << fileName << std::endl;
                     }
-
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Path: %s", filePath.c_str());
                     }
-
                     ImGui::PopID();
                 }
             }
@@ -678,11 +733,9 @@ int main()
 
         if (!selectedModelPath.empty()) {
             ImGui::Text("Selected: %s", fs::path(selectedModelPath).filename().string().c_str());
-
             if (ImGui::Button(" Import Selected Model")) {
                 std::string normalizedPath = selectedModelPath;
                 std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
-
                 std::cout << " Importing: " << normalizedPath << std::endl;
 
                 int existingIndex = -1;
@@ -724,20 +777,11 @@ int main()
 
                 if (success && modelToUse != nullptr) {
                     pushUndo();
-                    entities.push_back(EditorEntity{
-                        modelToUse,
-                        normalizedPath,
-                        glm::vec3(0, 0, 0),
-                        glm::vec3(0, 0, 0),
-                        glm::vec3(1, 1, 1),
-                        EntityType::Static,
-                        glm::vec3(0)
-                        });
+                    entities.push_back(EditorEntity{ modelToUse, normalizedPath, glm::vec3(0,0,0), glm::vec3(0,0,0), glm::vec3(1,1,1), EntityType::Static, glm::vec3(0) });
                     std::cout << " Added new entity with model: " << normalizedPath << std::endl;
                     selectedModelPath = "";
                 }
                 else {
-                    // If we failed, just clear the selection
                     selectedModelPath = "";
                 }
             }
@@ -749,15 +793,12 @@ int main()
         else {
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Select a model from the list above");
         }
-
-        ImGui::End(); // Content Browser
+        ImGui::End();
 
         // ==================== SKYBOX WINDOW ====================
         ImGui::Begin("Skybox");
-
         ImGui::Text("Sky Settings");
         ImGui::Separator();
-
         ImGui::Checkbox("Show Skybox", &showSkybox);
         ImGui::SameLine();
         if (ImGui::Button("Reset Sky")) {
@@ -774,41 +815,19 @@ int main()
         }
 
         if (ImGui::CollapsingHeader("Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
-            static const char* skyNames[] = {
-                "Day (Blue Sky)",
-                "Sunset",
-                "Golden Hour",
-                "Night",
-                "Space/Sci-Fi",
-                "Cyberpunk"
-            };
-
+            static const char* skyNames[] = { "Day (Blue Sky)", "Sunset", "Golden Hour", "Night", "Space/Sci-Fi", "Cyberpunk" };
             struct SkyPreset {
-                glm::vec3 top;
-                glm::vec3 horizon;
-                glm::vec3 bottom;
-                glm::vec3 sunColor;
-                glm::vec3 sunDir;
-                float sunIntensity;
-                float cloudDensity;
-                float cloudOpacity;
+                glm::vec3 top, horizon, bottom, sunColor, sunDir;
+                float sunIntensity, cloudDensity, cloudOpacity;
             };
-
             static std::vector<SkyPreset> skyPresets = {
-                { glm::vec3(0.2f, 0.4f, 0.8f), glm::vec3(0.6f, 0.7f, 0.9f), glm::vec3(0.4f, 0.5f, 0.6f),
-                  glm::vec3(1.0f, 0.9f, 0.6f), glm::vec3(0.5f, -0.2f, 0.3f), 1.0f, 1.5f, 0.3f },
-                { glm::vec3(0.1f, 0.2f, 0.5f), glm::vec3(0.9f, 0.5f, 0.2f), glm::vec3(0.3f, 0.2f, 0.1f),
-                  glm::vec3(1.0f, 0.6f, 0.2f), glm::vec3(0.3f, -0.4f, 0.2f), 1.2f, 2.0f, 0.4f },
-                { glm::vec3(0.3f, 0.5f, 0.8f), glm::vec3(0.9f, 0.7f, 0.3f), glm::vec3(0.5f, 0.3f, 0.1f),
-                  glm::vec3(1.0f, 0.8f, 0.3f), glm::vec3(0.4f, -0.3f, 0.2f), 1.5f, 1.0f, 0.2f },
-                { glm::vec3(0.02f, 0.02f, 0.05f), glm::vec3(0.1f, 0.1f, 0.15f), glm::vec3(0.05f, 0.05f, 0.08f),
-                  glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.5f, 0.0f), 0.0f, 0.5f, 0.1f },
-                { glm::vec3(0.01f, 0.01f, 0.05f), glm::vec3(0.2f, 0.1f, 0.3f), glm::vec3(0.05f, 0.02f, 0.1f),
-                  glm::vec3(0.8f, 0.6f, 0.4f), glm::vec3(0.2f, -0.6f, 0.1f), 0.8f, 0.3f, 0.05f },
-                { glm::vec3(0.8f, 0.1f, 0.5f), glm::vec3(0.1f, 0.2f, 0.8f), glm::vec3(0.0f, 0.0f, 0.1f),
-                  glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.3f, 0.0f), 0.0f, 0.8f, 0.2f }
+                { glm::vec3(0.2f,0.4f,0.8f), glm::vec3(0.6f,0.7f,0.9f), glm::vec3(0.4f,0.5f,0.6f), glm::vec3(1.0f,0.9f,0.6f), glm::vec3(0.5f,-0.2f,0.3f), 1.0f, 1.5f, 0.3f },
+                { glm::vec3(0.1f,0.2f,0.5f), glm::vec3(0.9f,0.5f,0.2f), glm::vec3(0.3f,0.2f,0.1f), glm::vec3(1.0f,0.6f,0.2f), glm::vec3(0.3f,-0.4f,0.2f), 1.2f, 2.0f, 0.4f },
+                { glm::vec3(0.3f,0.5f,0.8f), glm::vec3(0.9f,0.7f,0.3f), glm::vec3(0.5f,0.3f,0.1f), glm::vec3(1.0f,0.8f,0.3f), glm::vec3(0.4f,-0.3f,0.2f), 1.5f, 1.0f, 0.2f },
+                { glm::vec3(0.02f,0.02f,0.05f), glm::vec3(0.1f,0.1f,0.15f), glm::vec3(0.05f,0.05f,0.08f), glm::vec3(0.0f,0.0f,0.0f), glm::vec3(0.0f,-0.5f,0.0f), 0.0f, 0.5f, 0.1f },
+                { glm::vec3(0.01f,0.01f,0.05f), glm::vec3(0.2f,0.1f,0.3f), glm::vec3(0.05f,0.02f,0.1f), glm::vec3(0.8f,0.6f,0.4f), glm::vec3(0.2f,-0.6f,0.1f), 0.8f, 0.3f, 0.05f },
+                { glm::vec3(0.8f,0.1f,0.5f), glm::vec3(0.1f,0.2f,0.8f), glm::vec3(0.0f,0.0f,0.1f), glm::vec3(0.0f,0.0f,0.0f), glm::vec3(0.0f,-0.3f,0.0f), 0.0f, 0.8f, 0.2f }
             };
-
             if (ImGui::Combo("Preset", &selectedSky, skyNames, IM_ARRAYSIZE(skyNames))) {
                 customTopColor = skyPresets[selectedSky].top;
                 customHorizonColor = skyPresets[selectedSky].horizon;
@@ -828,20 +847,17 @@ int main()
                 ImGui::ColorEdit3("Horizon Color", &customHorizonColor[0]);
                 ImGui::ColorEdit3("Bottom Color", &customBottomColor[0]);
             }
-
             if (ImGui::CollapsingHeader("Sun Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::ColorEdit3("Sun Color", &customSunColor[0]);
                 ImGui::DragFloat3("Sun Direction", &customSunDirection[0], 0.05f, -1.0f, 1.0f);
                 ImGui::SliderFloat("Sun Intensity", &customSunIntensity, 0.0f, 2.0f);
             }
-
             if (ImGui::CollapsingHeader("Cloud Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::SliderFloat("Cloud Density", &customCloudDensity, 0.0f, 4.0f);
                 ImGui::SliderFloat("Cloud Opacity", &customCloudOpacity, 0.0f, 1.0f);
             }
         }
-
-        ImGui::End(); // Skybox window
+        ImGui::End();
 
         // ==================== OVERWRITE / RENAME POPUPS ====================
         if (showOverwriteWarning) {
@@ -868,7 +884,6 @@ int main()
             }
             ImGui::EndPopup();
         }
-
         if (showRenamePopup) {
             ImGui::OpenPopup("Rename Level");
             showRenamePopup = false;
@@ -892,17 +907,10 @@ int main()
         // ==================== FPS OVERLAY ====================
         if (showFPS) {
             ImGui::Begin("Performance", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
-
-            // FPS
             ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "FPS: %.1f", fps);
-
-            // Frame time in milliseconds
             float frameTimeMS = deltaTime * 1000.0f;
             ImGui::Text("Frame Time: %.2f ms", frameTimeMS);
-
-            // Entity count
             ImGui::Text("Entities: %zu", entities.size());
-
             ImGui::End();
         }
 
@@ -917,24 +925,15 @@ int main()
         glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
         glClear(GL_DEPTH_BUFFER_BIT);
 
-        // Extract frustum from camera view-projection matrix
         Frustum frustum = extractFrustum(camera.cameraMatrix);
-
-        glm::mat4 viewMatrix = camera.GetViewMatrix();
-        glm::mat4 inverseView = glm::inverse(viewMatrix);
-
         depthShader.Activate();
         glUniformMatrix4fv(glGetUniformLocation(depthShader.ID, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
 
         for (auto& entity : entities) {
-            // Skip if culling is enabled and entity is outside the frustum
             if (enableFrustumCulling) {
-                float radius = 1.0f; // Approximate sphere radius (you can make this per-entity)
-                if (!isSphereInFrustum(frustum, entity.position, radius)) {
-                    continue; // Skip drawing this entity
-                }
+                float radius = 1.0f;
+                if (!isSphereInFrustum(frustum, entity.position, radius)) continue;
             }
-
             glm::mat4 modelMat = glm::mat4(1.0f);
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.x), glm::vec3(1, 0, 0));
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.y), glm::vec3(0, 1, 0));
@@ -950,9 +949,7 @@ int main()
         glViewport(0, 0, width, height);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Re-extract frustum (or reuse the same one)
         Frustum frustum2 = extractFrustum(camera.cameraMatrix);
-
         gBufferShader.Activate();
         glUniformMatrix4fv(glGetUniformLocation(gBufferShader.ID, "camMatrix"), 1, GL_FALSE, glm::value_ptr(camera.cameraMatrix));
         glUniform3f(glGetUniformLocation(gBufferShader.ID, "camPos"), camera.Position.x, camera.Position.y, camera.Position.z);
@@ -961,14 +958,10 @@ int main()
         glUniform1i(glGetUniformLocation(gBufferShader.ID, "useHeightMap"), 1);
 
         for (auto& entity : entities) {
-            // Skip if culling is enabled and entity is outside the frustum
             if (enableFrustumCulling) {
-                float radius = 1.0f; // Approximate sphere radius
-                if (!isSphereInFrustum(frustum2, entity.position, radius)) {
-                    continue; // Skip drawing this entity
-                }
+                float radius = 1.0f;
+                if (!isSphereInFrustum(frustum2, entity.position, radius)) continue;
             }
-
             glm::mat4 modelMat = glm::mat4(1.0f);
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.x), glm::vec3(1, 0, 0));
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.y), glm::vec3(0, 1, 0));
@@ -980,6 +973,40 @@ int main()
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+        // ==================== SSAO PASS (run every frame if enabled) ====================
+        if (enableSSAO) {
+            glBindFramebuffer(GL_FRAMEBUFFER, ssaoFBO);
+            glClear(GL_COLOR_BUFFER_BIT);
+
+            ssaoShader.Activate();
+
+            glUniform1f(glGetUniformLocation(ssaoShader.ID, "radius"), ssaoRadius);
+            glUniform1f(glGetUniformLocation(ssaoShader.ID, "bias"), ssaoBias);
+
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gPosition);
+            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gNormal);
+            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, noiseTexture);
+
+            glUniform1i(glGetUniformLocation(ssaoShader.ID, "gPosition"), 0);
+            glUniform1i(glGetUniformLocation(ssaoShader.ID, "gNormal"), 1);
+            glUniform1i(glGetUniformLocation(ssaoShader.ID, "noiseTexture"), 2);
+
+            glm::mat4 proj = glm::perspective(glm::radians(editorFOV), (float)width / height, 0.1f, 1000.0f);
+            glUniformMatrix4fv(glGetUniformLocation(ssaoShader.ID, "projection"), 1, GL_FALSE, glm::value_ptr(proj));
+            glUniform2f(glGetUniformLocation(ssaoShader.ID, "noiseScale"), (float)width / 4.0f, (float)height / 4.0f);
+
+            for (unsigned int i = 0; i < 64; i++) {
+                std::string name = "samples[" + std::to_string(i) + "]";
+                glUniform3fv(glGetUniformLocation(ssaoShader.ID, name.c_str()), 1, glm::value_ptr(ssaoSamples[i]));
+            }
+
+            glDisable(GL_DEPTH_TEST);
+            glBindVertexArray(rectVAO);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glEnable(GL_DEPTH_TEST);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        }
+
         // ==================== LIGHTING PASS ====================
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -989,7 +1016,17 @@ int main()
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gNormal); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gNormal"), 1);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gColor); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gColor"), 2);
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gMetallicRoughness); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gMetallicRoughness"), 3);
-        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, whiteTexture); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "ssao"), 4);
+
+        if (enableSSAO) {
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(GL_TEXTURE_2D, ssaoColorBuffer);
+        }
+        else {
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(GL_TEXTURE_2D, whiteTexture);
+        }
+        glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "ssao"), 4);
+
         glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, depthMap); glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "shadowMap"), 5);
 
         glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "camPos"), camera.Position.x, camera.Position.y, camera.Position.z);
@@ -1000,30 +1037,34 @@ int main()
         glUniform4fv(glGetUniformLocation(deferredLightingShader.ID, "lightColor"), 1, glm::value_ptr(lightColor));
         glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightPos"), 1, glm::value_ptr(lightPos));
         glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightPos2"), 1, glm::value_ptr(lightPos2));
-        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "saturation"), saturation);
-        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "exposure"), exposure);
         glUniformMatrix4fv(glGetUniformLocation(deferredLightingShader.ID, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
 
         glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "showSkybox"), showSkybox ? 1 : 0);
 
-        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyTopColor"),
-            customTopColor.x, customTopColor.y, customTopColor.z);
-        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyHorizonColor"),
-            customHorizonColor.x, customHorizonColor.y, customHorizonColor.z);
-        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyBottomColor"),
-            customBottomColor.x, customBottomColor.y, customBottomColor.z);
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyTopColor"), customTopColor.x, customTopColor.y, customTopColor.z);
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyHorizonColor"), customHorizonColor.x, customHorizonColor.y, customHorizonColor.z);
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "skyBottomColor"), customBottomColor.x, customBottomColor.y, customBottomColor.z);
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "sunColor"), customSunColor.x, customSunColor.y, customSunColor.z);
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "sunDirection"), customSunDirection.x, customSunDirection.y, customSunDirection.z);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "sunIntensity"), customSunIntensity);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "cloudDensity"), customCloudDensity);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "cloudOpacity"), customCloudOpacity);
 
-        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "sunColor"),
-            customSunColor.x, customSunColor.y, customSunColor.z);
-        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "sunDirection"),
-            customSunDirection.x, customSunDirection.y, customSunDirection.z);
-        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "sunIntensity"),
-            customSunIntensity);
+        // Post-processing uniforms
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "saturation"), saturation);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "contrast"), contrast);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "gamma"), gamma);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "exposure"), exposure);
 
-        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "cloudDensity"),
-            customCloudDensity);
-        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "cloudOpacity"),
-            customCloudOpacity);
+        // SSAO & Bloom
+        glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "enableSSAO"), enableSSAO ? 1 : 0);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "ssaoRadius"), ssaoRadius);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "ssaoBias"), ssaoBias);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "ssaoPower"), ssaoPower);
+
+        glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "enableBloom"), enableBloom ? 1 : 0);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "bloomThreshold"), bloomThreshold);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "bloomIntensity"), bloomIntensity);
 
         glDisable(GL_DEPTH_TEST);
         glBindVertexArray(rectVAO);
