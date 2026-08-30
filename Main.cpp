@@ -436,9 +436,11 @@ int main()
         // ==================== SKY SETTINGS PANEL ====================
         ImGui::Separator();
         ImGui::Begin("Skybox");
-        ImGui::Text("🌅 Sky Settings");
 
-        // Toggle skybox
+        // ==================== SKY SETTINGS ====================
+        ImGui::Text("🌅 Sky Settings");
+        ImGui::Separator();
+
         ImGui::Checkbox("Show Skybox", &showSkybox);
         ImGui::SameLine();
         if (ImGui::Button("Reset Sky")) {
@@ -454,49 +456,49 @@ int main()
             customCloudOpacity = 0.3f;
         }
 
-        // Sky presets
-        static const char* skyNames[] = {    
-            "Day (Blue Sky)",
-            "Sunset",
-            "Golden Hour",
-            "Night",
-            "Space/Sci-Fi",
-            "Cyberpunk"
-        };
+        // ==================== PRESETS ====================
+        if (ImGui::CollapsingHeader("Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
+            static const char* skyNames[] = {
+                "Day (Blue Sky)",
+                "Sunset",
+                "Golden Hour",
+                "Night",
+                "Space/Sci-Fi",
+                "Cyberpunk"
+            };
 
-        struct SkyPreset {                  
-            glm::vec3 top;
-            glm::vec3 horizon;
-            glm::vec3 bottom;
-            glm::vec3 sunColor;
-            glm::vec3 sunDir;
-            float sunIntensity;
-            float cloudDensity;
-            float cloudOpacity;
-        };
+            struct SkyPreset {
+                glm::vec3 top;
+                glm::vec3 horizon;
+                glm::vec3 bottom;
+                glm::vec3 sunColor;
+                glm::vec3 sunDir;
+                float sunIntensity;
+                float cloudDensity;
+                float cloudOpacity;
+            };
 
-        static std::vector<SkyPreset> skyPresets = {  
-            // Day
-            { glm::vec3(0.2f, 0.4f, 0.8f), glm::vec3(0.6f, 0.7f, 0.9f), glm::vec3(0.4f, 0.5f, 0.6f),
-              glm::vec3(1.0f, 0.9f, 0.6f), glm::vec3(0.5f, -0.2f, 0.3f), 1.0f, 1.5f, 0.3f },
-              // Sunset
-              { glm::vec3(0.1f, 0.2f, 0.5f), glm::vec3(0.9f, 0.5f, 0.2f), glm::vec3(0.3f, 0.2f, 0.1f),
-                glm::vec3(1.0f, 0.6f, 0.2f), glm::vec3(0.3f, -0.4f, 0.2f), 1.2f, 2.0f, 0.4f },
-                // Golden Hour
-                { glm::vec3(0.3f, 0.5f, 0.8f), glm::vec3(0.9f, 0.7f, 0.3f), glm::vec3(0.5f, 0.3f, 0.1f),
-                  glm::vec3(1.0f, 0.8f, 0.3f), glm::vec3(0.4f, -0.3f, 0.2f), 1.5f, 1.0f, 0.2f },
-                  // Night
-                  { glm::vec3(0.02f, 0.02f, 0.05f), glm::vec3(0.1f, 0.1f, 0.15f), glm::vec3(0.05f, 0.05f, 0.08f),
-                    glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.5f, 0.0f), 0.0f, 0.5f, 0.1f },
-                    // Space
-                    { glm::vec3(0.01f, 0.01f, 0.05f), glm::vec3(0.2f, 0.1f, 0.3f), glm::vec3(0.05f, 0.02f, 0.1f),
-                      glm::vec3(0.8f, 0.6f, 0.4f), glm::vec3(0.2f, -0.6f, 0.1f), 0.8f, 0.3f, 0.05f },
-                      // Cyberpunk
-                      { glm::vec3(0.8f, 0.1f, 0.5f), glm::vec3(0.1f, 0.2f, 0.8f), glm::vec3(0.0f, 0.0f, 0.1f),
-                        glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.3f, 0.0f), 0.0f, 0.8f, 0.2f }
-        };
+            static std::vector<SkyPreset> skyPresets = {
+                // Day
+                { glm::vec3(0.2f, 0.4f, 0.8f), glm::vec3(0.6f, 0.7f, 0.9f), glm::vec3(0.4f, 0.5f, 0.6f),
+                  glm::vec3(1.0f, 0.9f, 0.6f), glm::vec3(0.5f, -0.2f, 0.3f), 1.0f, 1.5f, 0.3f },
+                  // Sunset
+                  { glm::vec3(0.1f, 0.2f, 0.5f), glm::vec3(0.9f, 0.5f, 0.2f), glm::vec3(0.3f, 0.2f, 0.1f),
+                    glm::vec3(1.0f, 0.6f, 0.2f), glm::vec3(0.3f, -0.4f, 0.2f), 1.2f, 2.0f, 0.4f },
+                    // Golden Hour
+                    { glm::vec3(0.3f, 0.5f, 0.8f), glm::vec3(0.9f, 0.7f, 0.3f), glm::vec3(0.5f, 0.3f, 0.1f),
+                      glm::vec3(1.0f, 0.8f, 0.3f), glm::vec3(0.4f, -0.3f, 0.2f), 1.5f, 1.0f, 0.2f },
+                      // Night
+                      { glm::vec3(0.02f, 0.02f, 0.05f), glm::vec3(0.1f, 0.1f, 0.15f), glm::vec3(0.05f, 0.05f, 0.08f),
+                        glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.5f, 0.0f), 0.0f, 0.5f, 0.1f },
+                        // Space
+                        { glm::vec3(0.01f, 0.01f, 0.05f), glm::vec3(0.2f, 0.1f, 0.3f), glm::vec3(0.05f, 0.02f, 0.1f),
+                          glm::vec3(0.8f, 0.6f, 0.4f), glm::vec3(0.2f, -0.6f, 0.1f), 0.8f, 0.3f, 0.05f },
+                          // Cyberpunk
+                          { glm::vec3(0.8f, 0.1f, 0.5f), glm::vec3(0.1f, 0.2f, 0.8f), glm::vec3(0.0f, 0.0f, 0.1f),
+                            glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.3f, 0.0f), 0.0f, 0.8f, 0.2f }
+            };
 
-        if (!useCustomSky) {
             if (ImGui::Combo("Preset", &selectedSky, skyNames, IM_ARRAYSIZE(skyNames))) {
                 customTopColor = skyPresets[selectedSky].top;
                 customHorizonColor = skyPresets[selectedSky].horizon;
@@ -507,27 +509,32 @@ int main()
                 customCloudDensity = skyPresets[selectedSky].cloudDensity;
                 customCloudOpacity = skyPresets[selectedSky].cloudOpacity;
             }
+            ImGui::Checkbox("Custom Mode", &useCustomSky);
         }
-        ImGui::Checkbox("Custom Mode", &useCustomSky);
 
+        // ==================== CUSTOM SKY COLORS ====================
         if (useCustomSky) {
-            ImGui::Text("🎨 Custom Sky Colors");
-            ImGui::ColorEdit3("Top Color", &customTopColor[0]);
-            ImGui::ColorEdit3("Horizon Color", &customHorizonColor[0]);
-            ImGui::ColorEdit3("Bottom Color", &customBottomColor[0]);
+            if (ImGui::CollapsingHeader("Custom Sky Colors", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::ColorEdit3("Top Color", &customTopColor[0]);
+                ImGui::ColorEdit3("Horizon Color", &customHorizonColor[0]);
+                ImGui::ColorEdit3("Bottom Color", &customBottomColor[0]);
+            }
 
-            ImGui::Separator();
-            ImGui::Text("☀️ Sun Settings");
-            ImGui::ColorEdit3("Sun Color", &customSunColor[0]);
-            ImGui::DragFloat3("Sun Direction", &customSunDirection[0], 0.05f, -1.0f, 1.0f);
-            ImGui::SliderFloat("Sun Intensity", &customSunIntensity, 0.0f, 2.0f);
+            // ==================== SUN SETTINGS ====================
+            if (ImGui::CollapsingHeader("Sun Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::ColorEdit3("Sun Color", &customSunColor[0]);
+                ImGui::DragFloat3("Sun Direction", &customSunDirection[0], 0.05f, -1.0f, 1.0f);
+                ImGui::SliderFloat("Sun Intensity", &customSunIntensity, 0.0f, 2.0f);
+            }
 
-            ImGui::Separator();
-            ImGui::Text("☁️ Cloud Settings");
-            ImGui::SliderFloat("Cloud Density", &customCloudDensity, 0.0f, 4.0f);
-            ImGui::SliderFloat("Cloud Opacity", &customCloudOpacity, 0.0f, 1.0f);
+            // ==================== CLOUD SETTINGS ====================
+            if (ImGui::CollapsingHeader("Cloud Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderFloat("Cloud Density", &customCloudDensity, 0.0f, 4.0f);
+                ImGui::SliderFloat("Cloud Opacity", &customCloudOpacity, 0.0f, 1.0f);
+            }
         }
-        ImGui::End();
+
+        ImGui::End(); // Skybox window
 
         // Add Object
         if (ImGui::CollapsingHeader("Add Object")) {
