@@ -18,7 +18,7 @@ A **custom OpenGL 4.6 game engine** built from scratch featuring **Deferred Shad
 ### 🎨 Rendering Pipeline
 - **Deferred Shading (G-Buffer)**: Position, Normal, Albedo, and Metallic/Roughness textures for efficient multi-light rendering.
 - **Physically Based Rendering (PBR)**: Cook-Torrance BRDF with GGX distribution, Smith geometry, and Fresnel-Schlick.
-- **Dynamic Lighting**: Directional (with Shadow Mapping), Point, and Spot Lights—all in a single lighting pass.
+- **Dynamic Lighting**: Directional (with Shadow Mapping (Need Some Fixes)), Point, and Spot Lights—all in a single lighting pass.
 - **HDR & Tone Mapping**: ACES-style tone mapping with exposure, saturation, and gamma correction.
 
 ### 🛠️ Level Editor (ImGui)
