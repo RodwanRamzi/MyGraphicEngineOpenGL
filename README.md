@@ -8,7 +8,7 @@
 A **custom OpenGL 4.6 game engine** built from scratch featuring **Deferred Shading**, **Physically Based Rendering (PBR)**, and a fully functional **Level Editor**. No commercial engines—just pure C++, OpenGL, and thousands of hours of dedication.
 
 <p align="center">
-  <img src="screenshots/screenshot1.png" alt="Engine Screenshot" width="800"/>
+  <img src="screenshots/screenshot2.png" alt="Engine Screenshot" width="800"/>
 </p>
 
 ---
