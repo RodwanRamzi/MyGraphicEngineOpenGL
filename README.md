@@ -33,7 +33,7 @@ The engine features a **Deferred PBR Renderer**, **SSAO**, **Bloom**, **Dynamic 
 ### 🎨 Rendering Pipeline
 - **Deferred Shading (G-Buffer)**: Position, Normal, Albedo, Metallic/Roughness textures for efficient multi-light rendering.
 - **Physically Based Rendering (PBR)**: Cook-Torrance BRDF with GGX distribution, Smith geometry, and Fresnel-Schlick.
-- **SSAO (Screen-Space Ambient Occlusion)**: Realistic ambient occlusion with adjustable radius, bias, and power.
+- **SSAO (Screen-Space Ambient Occlusion)**: Realistic ambient occlusion.
 - **Bloom**: Full post-processing bloom with threshold and intensity controls.
 - **Shadow Mapping**: Directional shadow maps with Percentage Closer Filtering (PCF).
 - **HDR & Tone Mapping**: ACES-style tone mapping with exposure, saturation, contrast, and gamma controls.
