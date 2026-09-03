@@ -43,7 +43,6 @@ The engine features a **Deferred PBR Renderer**, **SSAO**, **Bloom**, **Dynamic 
 - **Entity Management**: Add, select, move, rotate, and scale entities (Static, Player, Ball).
 - **Save/Load**: Serialize and deserialize entire levels to/from text format.
 - **Undo/Redo**: Full command pattern implementation (Ctrl+Z / Ctrl+Y).
-- **Mouse Picking**: Ray-casting for precise object selection.
 - **Content Browser**: Browse and import GLTF/GLB models directly from the editor.
 
 ### 📦 Asset Pipeline
