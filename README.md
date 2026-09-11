@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="Engine Screenshot" width="800"/>
+  <img src="screenshots/hero.png" alt="Engine Screenshot" width="800"/>
   <br>
   <i>Deferred PBR rendering with SSAO, HDR tone mapping, and environment reflections</i>
 </p>
@@ -217,11 +217,10 @@ Each script can declare its own parameters, and they appear in the Script Parame
 
 | View | File Path |
 | :--- | :--- |
-| **Hero / Main Render** | `docs/screenshots/hero.png` |
-| **Full Editor UI** | `docs/screenshots/editor.png` |
-| **G-Buffer Debug Views** | `docs/screenshots/gbuffer.png` |
-| **SSAO On/Off** | `docs/screenshots/ssao.png` |
-| **Volumetric Fog** | `docs/screenshots/fog.png` |
+| **Hero / Main Render** | `screenshots/hero.png` |
+| **Full Editor UI** | `screenshots/editor.png` |
+| **G-Buffer Debug Views** | `screenshots/gbuffer.png` |
+| **SSAO On/Off** | `screenshots/SSAO_ON.png` `screenshots/SSAO_OFF.png` |
 
 ---
 
