@@ -37,3 +37,11 @@
 *.json      text eol=lf
 *.gitignore text eol=lf
 *.gitattributes text eol=lf
+
+# ============================================================
+#              GitHub Linguist — Recognize GLSL shaders
+# ============================================================
+*.vert              linguist-language=GLSL
+*.frag              linguist-language=GLSL
+*.comp              linguist-language=GLSL
+*.glsl              linguist-language=GLSL
