@@ -220,7 +220,7 @@ Each script can declare its own parameters, and they appear in the Script Parame
 | **Hero / Main Render** | `screenshots/hero.png` |
 | **Full Editor UI** | `screenshots/editor.png` |
 | **G-Buffer Debug Views** | `screenshots/gbuffer.png` |
-| **SSAO On/Off** | `screenshots/ssao.png` |
+| **SSAO On/Off** | `screenshots/SSAO_ON.png` `screenshots/SSAO_OFF.png` |
 
 ---
 
