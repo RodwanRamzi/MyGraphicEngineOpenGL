@@ -1,72 +1,114 @@
 #version 460 core
+
 const float PI = 3.14159265359;
+
 layout (location = 0) out vec4 FragColor;
 layout (location = 1) out vec4 BloomColor;
 
 in vec2 TexCoords;
 
+// ============================================================
+//                        UNIFORMS
+// ============================================================
+
+// ---- G-Buffer ----
 uniform sampler2D gPosition;
 uniform sampler2D gNormal;
 uniform sampler2D gColor;
 uniform sampler2D gMetallicRoughness;
+uniform sampler2D gEmissive;
+
+// ---- Auxiliary buffers ----
 uniform sampler2D shadowMap;
 uniform sampler2D ssao;
 
-uniform vec3 camPos;
-uniform vec3 viewPos;
-uniform mat4 viewMatrix;
-uniform mat4 inverseViewMatrix;
-uniform vec4 lightColor;
-uniform vec3 lightDir;
-uniform vec3 lightPos;
-uniform vec3 lightPos2;
-uniform mat4 lightSpaceMatrix;
+// ---- Camera ----
+uniform vec3  camPos;
+uniform vec3  viewPos;
+uniform mat4  viewMatrix;
+uniform mat4  inverseViewMatrix;
+uniform mat4  cameraMatrix;
 
-// ============== POST-PROCESSING UNIFORMS ==============
+// ---- Environment ----
+uniform samplerCube environmentMap;
+uniform bool  enableEnvReflections;
+uniform float envReflectionIntensity;
+
+// ---- Skybox / Gradient sky ----
+uniform bool  showSkybox;
+uniform vec3  skyTopColor;
+uniform vec3  skyHorizonColor;
+uniform vec3  skyBottomColor;
+uniform vec3  sunColor;
+uniform vec3  sunDirection;
+uniform float sunIntensity;
+uniform float cloudDensity;
+uniform float cloudOpacity;
+
+// ---- Shadow (directional) ----
+uniform mat4  lightSpaceMatrix;
+uniform vec3  lightDir;
+uniform vec4  lightColor;
+
+// ---- SSAO ----
+uniform bool  enableSSAO;
+uniform float ssaoRadius;
+uniform float ssaoBias;
+uniform float ssaoPower;
+
+// ---- Contact shadows ----
+uniform bool  enableContactShadows;
+
+// ---- Bloom ----
+uniform bool  enableBloom;
+uniform float bloomThreshold;
+uniform float bloomIntensity;
+
+// ---- Tone mapping ----
 uniform float saturation;
 uniform float contrast;
 uniform float gamma;
 uniform float exposure;
 
-// ==================== SKY UNIFORMS ====================
-uniform bool showSkybox;
-uniform vec3 skyTopColor;
-uniform vec3 skyHorizonColor;
-uniform vec3 skyBottomColor;
-uniform vec3 sunColor;
-uniform vec3 sunDirection;
-uniform float sunIntensity;
-uniform float cloudDensity;
-uniform float cloudOpacity;
-uniform bool useCustomSky;
+// ---- Emissive fallback (uniform color) ----
+uniform vec3  uEmissiveColor;
+uniform float uEmissiveIntensity;
 
-// ==================== SSAO & BLOOM UNIFORMS ====================
-uniform bool enableSSAO;
-uniform float ssaoRadius;
-uniform float ssaoBias;
-uniform float ssaoPower;
+// ---- Debug view ----
+uniform int debugView; // 0=off, 1=Position, 2=Normal, 3=Albedo,
+                       // 4=Metallic/Roughness, 5=Emissive, 6=SSAO, 7=Depth
 
-uniform bool enableBloom;
-uniform float bloomThreshold;
-uniform float bloomIntensity;
+// ---- Dynamic lights ----
+#define MAX_LIGHTS 128
+uniform int   numLights;
+uniform vec3  lightPositions[MAX_LIGHTS];
+uniform vec3  lightColors[MAX_LIGHTS];
+uniform float lightIntensities[MAX_LIGHTS];
+uniform float lightRanges[MAX_LIGHTS];
+uniform int   lightTypes[MAX_LIGHTS]; // 0=Point, 1=Spot, 2=Directional, 3=Ambient
+uniform vec3  lightDirections[MAX_LIGHTS];
+uniform float lightInnerCone[MAX_LIGHTS];
+uniform float lightOuterCone[MAX_LIGHTS];
 
-// ==================== PBR FUNCTIONS ====================
+// ============================================================
+//                        PBR
+// ============================================================
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
+    float a  = roughness * roughness;
     float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
+    float NdotH  = max(dot(N, H), 0.0);
     float NdotH2 = NdotH * NdotH;
-    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    float denom  = (NdotH2 * (a2 - 1.0) + 1.0);
     denom = PI * denom * denom;
     return a2 / denom;
 }
 
 float GeometrySchlickGGX(float NdotV, float roughness) {
-    float r = (roughness + 1.0);
+    float r = roughness + 1.0;
     float k = (r * r) / 8.0;
     return NdotV / (NdotV * (1.0 - k) + k);
 }
@@ -76,48 +118,69 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
            GeometrySchlickGGX(max(dot(N, L), 0.0), roughness);
 }
 
-// ==================== SHADOW ====================
+// ============================================================
+//                    SHADOW (PCF)
+// ============================================================
 float ShadowCalculation(vec3 fragPos, vec3 normal) {
     vec3 fragPosOffset = fragPos + normal * 0.02;
-    vec4 fragPosLight = lightSpaceMatrix * vec4(fragPosOffset, 1.0);
-    vec3 projCoords = fragPosLight.xyz / fragPosLight.w;
+    vec4 fragPosLight   = lightSpaceMatrix * vec4(fragPosOffset, 1.0);
+    vec3 projCoords     = fragPosLight.xyz / fragPosLight.w;
     projCoords = projCoords * 0.5 + 0.5;
+
     if (projCoords.z > 1.0) return 0.0;
 
     float bias = max(0.005 * (1.0 - dot(normal, lightDir)), 0.0005);
 
     float shadow = 0.0;
     vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
-    for(int x = -1; x <= 1; ++x) {
-        for(int y = -1; y <= 1; ++y) {
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
             float pcfDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r;
-            shadow += (projCoords.z - bias > pcfDepth ? 1.0 : 0.0);
+            shadow += (projCoords.z - bias > pcfDepth) ? 1.0 : 0.0;
         }
     }
     return shadow / 9.0;
 }
 
-// ==================== SUN ====================
-vec3 addSun(vec3 worldViewDir, vec3 skyColor) {
-    vec3 sunDir = normalize(sunDirection);
-    float sunAngle = dot(worldViewDir, sunDir);
-    float sunSize = 0.998;
-    float glowSize = 0.98;
-    float sunIntensityVal = smoothstep(sunSize, 1.0, sunAngle);
-    float glowIntensity = smoothstep(glowSize, 0.99, sunAngle) * 0.5;
-    vec3 result = skyColor;
-    result += sunColor * sunIntensityVal * sunIntensity;
-    result += sunColor * 0.7 * glowIntensity * sunIntensity * 0.5;
-    return result;
+float ContactShadow(vec3 fragPos, vec3 normal, vec3 lightDir, vec2 uv) {
+    float shadow   = 0.0;
+    float steps    = 8.0;
+    float stepSize = 0.02;
+
+    vec3 startPos = fragPos + normal * 0.005;
+    vec3 dir      = -lightDir;
+
+    for (int i = 0; i < int(steps); i++) {
+        float t = float(i) * stepSize;
+        vec3 samplePos = startPos + dir * t;
+
+        vec4 clipPos  = cameraMatrix * vec4(samplePos, 1.0);
+        vec2 sampleUV = clipPos.xy / clipPos.w * 0.5 + 0.5;
+
+        if (sampleUV.x < 0.0 || sampleUV.x > 1.0 ||
+            sampleUV.y < 0.0 || sampleUV.y > 1.0) break;
+
+        vec3  sampleFragPos = texture(gPosition, sampleUV).rgb;
+        float sampleDepth   = length(sampleFragPos - camPos);
+        float currentDepth  = length(samplePos - camPos);
+
+        if (currentDepth > sampleDepth + 0.002) {
+            shadow = 1.0 - (float(i) / steps);
+            break;
+        }
+    }
+    return shadow * 0.7;
 }
 
-// ==================== CLOUDS ====================
+// ============================================================
+//                    SUN + CLOUDS
+// ============================================================
 float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
 }
 
 float fbm(vec2 p) {
-    float value = 0.0;
+    float value     = 0.0;
     float amplitude = 0.5;
     float frequency = 1.0;
     for (int i = 0; i < 4; i++) {
@@ -129,27 +192,41 @@ float fbm(vec2 p) {
         float d = hash(q + vec2(1.0, 1.0));
         vec2 u = r * r * (3.0 - 2.0 * r);
         float noise = mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-        value += amplitude * noise;
+        value     += amplitude * noise;
         amplitude *= 0.5;
         frequency *= 2.0;
     }
     return value;
 }
 
+vec3 addSun(vec3 worldViewDir, vec3 skyColor) {
+    vec3  sunDir         = normalize(sunDirection);
+    float sunAngle       = dot(worldViewDir, sunDir);
+    float sunIntensityV  = smoothstep(0.998, 1.0, sunAngle);
+    float glowIntensity  = smoothstep(0.98, 0.99, sunAngle) * 0.5;
+
+    vec3 result = skyColor;
+    result += sunColor * sunIntensityV * sunIntensity;
+    result += sunColor * 0.7 * glowIntensity * sunIntensity * 0.5;
+    return result;
+}
+
 vec3 addClouds(vec3 worldViewDir, vec3 skyColor) {
     vec2 cloudUV = worldViewDir.xz / (worldViewDir.y + 0.1) * 0.5 + vec2(0.5);
     cloudUV += vec2(0.1, 0.2);
+
     float cloudDensityVal = fbm(cloudUV * cloudDensity);
     cloudDensityVal = smoothstep(0.4, 0.8, cloudDensityVal);
     cloudDensityVal *= cloudOpacity;
+
     vec3 cloudColor = mix(vec3(1.0), vec3(0.9, 0.85, 0.8), cloudDensityVal);
     return mix(skyColor, cloudColor, cloudDensityVal);
 }
 
 vec3 getGradientSky(vec3 viewDir) {
-    float y = viewDir.y;
-    float skyFactor = clamp(y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 skyColor;
+    float skyFactor = clamp(viewDir.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3  skyColor;
+
     if (skyFactor > 0.5) {
         float t = (skyFactor - 0.5) * 2.0;
         skyColor = mix(skyHorizonColor, skyTopColor, t);
@@ -160,143 +237,203 @@ vec3 getGradientSky(vec3 viewDir) {
     return skyColor;
 }
 
-void main() {
-    // Read G-Buffer
-    vec3 fragPos = texture(gPosition, TexCoords).rgb;
-    vec3 normal = texture(gNormal, TexCoords).rgb;
-    vec3 albedo = texture(gColor, TexCoords).rgb;
-    vec3 mr = texture(gMetallicRoughness, TexCoords).rgb;
+// ============================================================
+//                 DEBUG VIEW HELPER
+// ============================================================
+vec3 GetDebugColor(int view, vec3 fragPos, vec3 normal, vec3 albedo,
+                   float metallic, float roughness)
+{
+    if (view == 1) return fragPos * 0.1;
+    if (view == 2) return normal * 0.5 + 0.5;
+    if (view == 3) return albedo;
+    if (view == 4) return vec3(metallic, roughness, 0.0);
+    if (view == 5) return texture(gEmissive, TexCoords).rgb;
+    if (view == 6) return vec3(texture(ssao, TexCoords).r);
+    if (view == 7) {
+        float dist = length(fragPos - camPos);
+        return vec3(1.0 - clamp(dist / 50.0, 0.0, 1.0));
+    }
+    return vec3(0.0);
+}
 
+// ============================================================
+//                    LIGHTING HELPERS
+// ============================================================
+vec3 CalculatePBR(vec3 N, vec3 V, vec3 L, vec3 albedo, float metallic,
+                  float roughness, vec3 radiance)
+{
+    vec3  H    = normalize(V + L);
+    float NDF  = DistributionGGX(N, H, roughness);
+    float G    = GeometrySmith(N, V, L, roughness);
+    vec3  F0   = mix(vec3(0.04), albedo, metallic);
+    vec3  F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+    vec3  numerator   = NDF * G * F;
+    float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+    vec3  specular    = numerator / denominator;
+
+    vec3  kD    = (vec3(1.0) - F) * (1.0 - metallic);
+    float NdotL = max(dot(N, L), 0.0);
+
+    return (kD * albedo / PI + specular) * radiance * NdotL;
+}
+
+// ============================================================
+//                         MAIN
+// ============================================================
+void main() {
+    // ---- Read G-Buffer ----
+    vec3  fragPos  = texture(gPosition, TexCoords).rgb;
+    vec3  normal   = texture(gNormal, TexCoords).rgb;
+    vec3  albedo   = texture(gColor, TexCoords).rgb;
+    vec3  mr       = texture(gMetallicRoughness, TexCoords).rgb;
     float metallic = mr.r;
     float roughness = mr.g;
 
-    vec3 viewDir = normalize(viewPos - fragPos);
-
-    // Skybox (when no geometry)
-    if (length(fragPos) < 0.001) {
-        vec3 viewDirViewSpace = normalize(vec3(TexCoords * 2.0 - 1.0, -1.0));
-        vec3 worldViewDir = normalize((inverseViewMatrix * vec4(viewDirViewSpace, 0.0)).xyz);
-        vec3 skyColor;
-        if (showSkybox) {
-            skyColor = getGradientSky(worldViewDir);
-            skyColor = addSun(worldViewDir, skyColor);
-            skyColor = addClouds(worldViewDir, skyColor);
-        } else {
-            skyColor = vec3(0.05, 0.05, 0.08);
-        }
-        FragColor = vec4(skyColor, 1.0);
+    // ---- Debug view (early-out) ----
+    if (debugView > 0) {
+        FragColor  = vec4(GetDebugColor(debugView, fragPos, normal, albedo,
+                                        metallic, roughness), 1.0);
+        BloomColor = vec4(0.0);
         return;
     }
 
+    // ---- Skybox (background pixel) ----
+    if (length(fragPos) < 0.001) {
+        vec3 viewDirViewSpace = normalize(vec3(TexCoords * 2.0 - 1.0, -1.0));
+        vec3 worldViewDir     = normalize((inverseViewMatrix * vec4(viewDirViewSpace, 0.0)).xyz);
+
+        vec3 skyColor;
+        if (showSkybox) {
+            skyColor = texture(environmentMap, worldViewDir).rgb;
+        } else {
+            skyColor = getGradientSky(worldViewDir);
+            skyColor = addSun(worldViewDir, skyColor);
+            skyColor = addClouds(worldViewDir, skyColor);
+        }
+        FragColor  = vec4(skyColor, 1.0);
+        BloomColor = vec4(0.0);
+        return;
+    }
+
+    // ---- Surface vectors ----
     vec3 N = normalize(normal);
     vec3 V = normalize(camPos - fragPos);
-    float shadow = (dot(N, -lightDir) > 0.0) ? ShadowCalculation(fragPos, N) : 0.0;
+    vec3 L_dir = normalize(-lightDir);
+
+    // ---- Shadows ----
+    float shadow        = (dot(N, -lightDir) > 0.0)
+                          ? ShadowCalculation(fragPos, N) : 0.0;
+    float contactShadow = enableContactShadows
+                          ? ContactShadow(fragPos, N, L_dir, TexCoords) : 0.0;
+
+    float shadowFactor = 1.0 - shadow;
+    shadowFactor = clamp(shadowFactor - contactShadow * 0.5, 0.0, 1.0);
+
+    // ---- Ambient occlusion ----
     float ao = enableSSAO ? pow(texture(ssao, TexCoords).r, ssaoPower) : 1.0;
 
-    // ==================== AMBIENT ====================
+    // ---- Base ambient contribution ----
     vec3 ambient = albedo * 0.15 * ao;
 
-    // ==================== DIRECTIONAL LIGHT ====================
-    vec3 L_dir = normalize(-lightDir);
-    vec3 H_dir = normalize(V + L_dir);
-    float NDF_dir = DistributionGGX(N, H_dir, roughness);
-    float G_dir = GeometrySmith(N, V, L_dir, roughness);
-    vec3 F0_dir = vec3(0.04);
-    F0_dir = mix(F0_dir, albedo, metallic);
-    vec3 F_dir = fresnelSchlick(max(dot(H_dir, V), 0.0), F0_dir);
-    vec3 numerator_dir = NDF_dir * G_dir * F_dir;
-    float denominator_dir = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L_dir), 0.0) + 0.0001;
-    vec3 specular_dir = numerator_dir / denominator_dir;
-    vec3 kD_dir = vec3(1.0) - F_dir;
-    kD_dir *= 1.0 - metallic;
-    float NdotL_dir = max(dot(N, L_dir), 0.0);
-    vec3 dirLight = (kD_dir * albedo / PI + specular_dir) * lightColor.rgb * NdotL_dir * (1.0 - shadow);
+    // ---- Directional light (legacy, uses uniform lightColor + lightDir) ----
+    vec3 dirLight = CalculatePBR(N, V, L_dir, albedo, metallic, roughness,
+                                 lightColor.rgb);
+    dirLight *= shadowFactor;
 
-    // ==================== POINT LIGHT 1 ====================
-    vec3 lightVec1 = lightPos - fragPos;
-    float dist1 = length(lightVec1);
-    float attenuation1 = 1.0 / (dist1 * dist1 + 0.01);
-    vec3 L1 = normalize(lightVec1);
-    vec3 H1 = normalize(V + L1);
-    float NDF1 = DistributionGGX(N, H1, roughness);
-    float G1 = GeometrySmith(N, V, L1, roughness);
-    vec3 F0_1 = vec3(0.04);
-    F0_1 = mix(F0_1, albedo, metallic);
-    vec3 F1 = fresnelSchlick(max(dot(H1, V), 0.0), F0_1);
-    vec3 numerator1 = NDF1 * G1 * F1;
-    float denominator1 = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L1), 0.0) + 0.0001;
-    vec3 specular1 = numerator1 / denominator1;
-    vec3 kD1 = vec3(1.0) - F1;
-    kD1 *= 1.0 - metallic;
-    float NdotL1 = max(dot(N, L1), 0.0);
-    vec3 pointLight1 = (kD1 * albedo / PI + specular1) * lightColor.rgb * attenuation1 * NdotL1;
+    // ============================================================
+    //              DYNAMIC LIGHTS (array)
+    // ============================================================
+    vec3 lightAccum = vec3(0.0);
 
-    // ==================== POINT LIGHT 2 ====================
-    vec3 lightVec2 = lightPos2 - fragPos;
-    float dist2 = length(lightVec2);
-    float attenuation2 = 1.0 / (dist2 * dist2 + 0.01);
-    vec3 L2 = normalize(lightVec2);
-    vec3 H2 = normalize(V + L2);
-    float NDF2 = DistributionGGX(N, H2, roughness);
-    float G2 = GeometrySmith(N, V, L2, roughness);
-    vec3 F0_2 = vec3(0.04);
-    F0_2 = mix(F0_2, albedo, metallic);
-    vec3 F2 = fresnelSchlick(max(dot(H2, V), 0.0), F0_2);
-    vec3 numerator2 = NDF2 * G2 * F2;
-    float denominator2 = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L2), 0.0) + 0.0001;
-    vec3 specular2 = numerator2 / denominator2;
-    vec3 kD2 = vec3(1.0) - F2;
-    kD2 *= 1.0 - metallic;
-    float NdotL2 = max(dot(N, L2), 0.0);
-    vec3 pointLight2 = (kD2 * albedo / PI + specular2) * lightColor.rgb * attenuation2 * NdotL2;
+    for (int i = 0; i < numLights; i++) {
+        vec3  lightPos_i = lightPositions[i];
+        vec3  lightCol   = lightColors[i];
+        float intensity  = lightIntensities[i];
+        int   type       = lightTypes[i];
 
-    // ==================== SPOT LIGHT ====================
-    vec3 lightVec3 = lightPos - fragPos;
-    float dist3 = length(lightVec3);
-    float attenuation3 = 1.0 / (dist3 * dist3 + 0.01);
-    vec3 L3 = normalize(lightVec3);
-    vec3 H3 = normalize(V + L3);
-    float outerCone = 0.90f;
-    float innerCone = 0.95f;
-    float angle = dot(vec3(0.0f, -1.0f, 0.0f), -L3);
-    float spotIntensity = clamp((angle - outerCone) / (innerCone - outerCone), 0.0f, 1.0f);
-    float NDF3 = DistributionGGX(N, H3, roughness);
-    float G3 = GeometrySmith(N, V, L3, roughness);
-    vec3 F0_3 = vec3(0.04);
-    F0_3 = mix(F0_3, albedo, metallic);
-    vec3 F3 = fresnelSchlick(max(dot(H3, V), 0.0), F0_3);
-    vec3 numerator3 = NDF3 * G3 * F3;
-    float denominator3 = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L3), 0.0) + 0.0001;
-    vec3 specular3 = numerator3 / denominator3;
-    vec3 kD3 = vec3(1.0) - F3;
-    kD3 *= 1.0 - metallic;
-    float NdotL3 = max(dot(N, L3), 0.0);
-    vec3 spotLight3 = (kD3 * albedo / PI + specular3) * lightColor.rgb * attenuation3 * spotIntensity * NdotL3;
+        // ---- Ambient (type 3) — no PBR, just albedo * color * intensity ----
+        if (type == 3) {
+            lightAccum += lightCol * intensity * albedo;
+            continue;
+        }
 
-    // ==================== COMBINE ALL LIGHTS ====================
-    vec3 color = ambient + dirLight + pointLight1 * 0.8 + pointLight2 * 0.5 + spotLight3 * 0.6;
+        vec3  L    = normalize(lightPos_i - fragPos);
+        float dist = length(lightPos_i - fragPos);
+        float range = lightRanges[i];
 
-    // ==================== POST-PROCESSING ====================
-    // 1. Saturation
+        float attenuation = clamp(1.0 - (dist * dist) / (range * range), 0.0, 1.0);
+        attenuation *= attenuation;
+        attenuation  = max(attenuation, 0.0);
+
+        // ---- Spot (type 1) ----
+        if (type == 1) {
+            vec3  spotDir = normalize(lightDirections[i]);
+            float angle   = dot(-L, spotDir);
+            float inner   = lightInnerCone[i];
+            float outer   = lightOuterCone[i];
+            float spotFactor = clamp((angle - outer) / (inner - outer), 0.0, 1.0);
+            attenuation *= spotFactor;
+        }
+
+        // ---- Directional (type 2) ----
+        if (type == 2) {
+            L = -normalize(lightDirections[i]);
+            attenuation = 1.0;
+        }
+
+        vec3 radiance = lightCol * intensity * attenuation;
+        lightAccum += CalculatePBR(N, V, L, albedo, metallic, roughness, radiance);
+    }
+
+    // ---- Combine direct + ambient ----
+    vec3 color = ambient + dirLight + lightAccum;
+
+    // ============================================================
+    //              ENVIRONMENT REFLECTIONS
+    // ============================================================
+    if (enableEnvReflections && roughness < 0.9) {
+        vec3 R = reflect(-V, N);
+        R.x = -R.x;
+
+        float mipLevel = roughness * 4.0; // MAX_MIP_LEVEL = 4.0
+        vec3  envColor = textureLod(environmentMap, R, mipLevel).rgb;
+
+        float fresnel      = pow(1.0 - max(dot(N, V), 0.0), 5.0);
+        float reflectivity = mix(0.04, 1.0, metallic);
+        float roughFactor  = 1.0 - roughness * 0.3;
+
+        float strength = envReflectionIntensity * reflectivity * fresnel * roughFactor;
+        strength = clamp(strength, 0.0, 1.0);
+
+        color += envColor * strength;
+    }
+
+    // ============================================================
+    //              TONE MAPPING + COLOR GRADING
+    // ============================================================
+    color  = color / (color + vec3(1.0));   // Reinhard
+    color *= exposure;
+    color  = (color - 0.5) * contrast + 0.5;
+
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
     color = mix(vec3(luma), color, saturation);
 
-    // 2. Exposure (Reinhard)
-    color = vec3(1.0) - exp(-color * exposure);
-
-    // 3. Contrast
-    color = (color - 0.5) * contrast + 0.5;
-
-    // 4. Gamma
     color = pow(color, vec3(1.0 / gamma));
+    color = clamp(color, 0.0, 1.0);
 
-    // Final output
+    // ---- Emissive ----
+    color += texture(gEmissive, TexCoords).rgb;
+
     FragColor = vec4(color, 1.0);
 
-    // ==================== BLOOM ====================
+    // ============================================================
+    //              BLOOM
+    // ============================================================
     float brightness = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    if (enableBloom && brightness > bloomThreshold)
+    if (enableBloom && brightness > bloomThreshold) {
         BloomColor = vec4(color * bloomIntensity, 1.0);
-    else
+    } else {
         BloomColor = vec4(0.0);
+    }
 }

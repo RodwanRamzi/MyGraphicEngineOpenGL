@@ -1,0 +1,2 @@
+models/Mountains/Mountains-Test_01.gltf|-6.5|-36.8|0|0|0|0|1|1|1|0||0|1|1|1|0|0.939|1|0|0|0|0|1|0|0|0|0|||||0
+models/DamagedHelmet/DamagedHelmet.gltf|0|0|0|0|0|0|1|1|1|0||0|1|1|1|0|0.5|1|0|0|0|0|1|0|1|0|0|||||0

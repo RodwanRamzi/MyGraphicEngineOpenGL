@@ -1,12 +1,14 @@
 #version 460 core
-layout(location = 0) in vec3 aPos;
+layout (location = 0) in vec3 aPos;
+
+out vec3 localPos;
 
 uniform mat4 view;
 uniform mat4 projection;
-
-out vec3 TexCoords;
+uniform mat4 model;   // ← أضف هذا
 
 void main() {
-    TexCoords = aPos;
-    gl_Position = projection * view * vec4(aPos, 1.0);
+    localPos = aPos;
+    mat4 rotView = mat4(mat3(view));
+    gl_Position = projection * rotView * model * vec4(aPos, 1.0);
 }

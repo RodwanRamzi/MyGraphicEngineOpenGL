@@ -1,15 +1,17 @@
 #pragma once
 #include <glad/glad.h>
-#include <stb/stb_image.h>  // ✅ MUST BE HERE to find stbi_load!
+#include <stb/stb_image.h>  
 #include <string>
 #include "shaderClass.h"
 
 class Texture {
 public:
-    Texture() : ID(0), unit(0), type("") {}  // ✅ Default constructor
+    Texture() : ID(0), unit(0), type("") {}  
 
     Texture(const char* image, const char* texType, GLuint slot);
+    Texture(unsigned int id, const char* type, unsigned int slot);
 
+    std::string path;
     std::string type;
     GLuint ID;
     GLuint unit;
