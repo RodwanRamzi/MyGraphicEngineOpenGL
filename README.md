@@ -221,7 +221,6 @@ Each script can declare its own parameters, and they appear in the Script Parame
 | **Full Editor UI** | `docs/screenshots/editor.png` |
 | **G-Buffer Debug Views** | `docs/screenshots/gbuffer.png` |
 | **SSAO On/Off** | `docs/screenshots/ssao.png` |
-| **Volumetric Fog** | `docs/screenshots/fog.png` |
 
 ---
 
