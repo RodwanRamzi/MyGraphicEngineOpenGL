@@ -262,5 +262,3 @@ Special thanks to the incredible open-source community:
 <p align="center">
   <b>Built with ❤️ in Libya 🇱🇾 by <a href="https://github.com/RodwanRamzi">Rodwan Ramzi</a></b>
 </p>
-=======
->>>>>>> Stashed changes
