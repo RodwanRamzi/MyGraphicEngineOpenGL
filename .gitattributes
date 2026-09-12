@@ -45,3 +45,8 @@
 *.frag              linguist-language=GLSL
 *.comp              linguist-language=GLSL
 *.glsl              linguist-language=GLSL
+
+# ============================================================
+#         Mark Libraries as vendored (exclude from stats)
+# ============================================================
+Libraries/**    linguist-vendored
