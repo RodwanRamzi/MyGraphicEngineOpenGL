@@ -69,6 +69,7 @@ CMakeLists.txt          linguist-vendored
 *.min.css               linguist-vendored
 
 # ============================================================
-#              We don't write C — exclude all .c files
+#              glad.c is a third-party OpenGL loader
 # ============================================================
+glad.c              linguist-vendored
 *.c                 linguist-vendored
