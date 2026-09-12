@@ -1,4 +1,3 @@
-<<<<<<< Updated upstream
 # 🖥️ MyGraphicEngineOpenGL — Deferred PBR Game Engine
 
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
