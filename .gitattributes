@@ -67,3 +67,8 @@ CMakeLists.txt          linguist-vendored
 # ============================================================
 *.min.js                linguist-vendored
 *.min.css               linguist-vendored
+
+# ============================================================
+#              We don't write C — exclude all .c files
+# ============================================================
+*.c                 linguist-vendored
