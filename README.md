@@ -1,4 +1,3 @@
-<<<<<<< Updated upstream
 # 🖥️ MyGraphicEngineOpenGL — Deferred PBR Game Engine
 
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
@@ -140,7 +139,7 @@ The engine features a **Deferred PBR Renderer** with a 5-attachment G-Buffer, **
 | Key | Action |
 | :--- | :--- |
 | **WASD** | Move (in Play Mode) |
-| **Mouse** | Look around (in Play Mode) |
+| **Right Mouse Button** | Look around (in Play Mode) |
 | **Space** | Jump (in Play Mode) |
 | **R** | Reset player & camera (in Play Mode) |
 | **F5** | Toggle Play Mode |
@@ -148,6 +147,7 @@ The engine features a **Deferred PBR Renderer** with a 5-attachment G-Buffer, **
 | **Ctrl+Y** | Redo |
 | **T / R / S** | Translate / Rotate / Scale gizmo |
 | **Esc** | Exit Play Mode |
+| **G** | Toggle Cursor Lock When Click Right Mouse Button |
 
 ---
 
@@ -262,5 +262,3 @@ Special thanks to the incredible open-source community:
 <p align="center">
   <b>Built with ❤️ in Libya 🇱🇾 by <a href="https://github.com/RodwanRamzi">Rodwan Ramzi</a></b>
 </p>
-=======
->>>>>>> Stashed changes
