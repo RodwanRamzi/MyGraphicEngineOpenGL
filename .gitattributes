@@ -50,3 +50,20 @@
 #         Mark Libraries as vendored (exclude from stats)
 # ============================================================
 Libraries/**    linguist-vendored
+
+# ============================================================
+#              Exclude ALL third-party code
+# ============================================================
+Libraries/**            linguist-vendored
+imgui/**                linguist-vendored
+scripts/**              linguist-vendored=false
+test/**                 linguist-vendored
+*.natvis                linguist-vendored
+*.cmake                 linguist-vendored
+CMakeLists.txt          linguist-vendored
+
+# ============================================================
+#              Exclude generated / build files
+# ============================================================
+*.min.js                linguist-vendored
+*.min.css               linguist-vendored
