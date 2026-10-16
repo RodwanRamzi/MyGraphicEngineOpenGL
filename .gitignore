@@ -29,9 +29,8 @@
 /*.opensdf
 /*.VC.db
 /*.vcxproj.bak
-/*.recipe
 
-# ---- Executables ----
+# ---- Executables & binaries ----
 *.exe
 *.dll
 *.lib
@@ -44,8 +43,6 @@
 # ---- Temp ----
 *.tmp
 *.log
-
-# ---- ImGui state ----
 imgui.ini
 
 # ---- OS ----
@@ -53,22 +50,14 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# ---- Accidental shell junk ----
-/cd
-/dir
-/echo
-/python
-/FETCH_HEAD
-
-# ---- Never ignore these folders ----
+# ---- Never ignore (source, shaders, assets) ----
 !shaders/**
 !luts/**
-!Scripts/**
 !scripts/**
+!Scripts/**
 !cubemap/**
 !Levels/**
 !models/**
 !docs/**
 !screenshots/**
-!screenshots
 !Libraries/**
