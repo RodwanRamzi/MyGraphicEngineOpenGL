@@ -1,0 +1,24 @@
+#version 460 core
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba16f, binding = 0) uniform image2D currentColor;
+layout(rgba16f, binding = 1) uniform image2D historyColor;
+
+uniform float blendFactor = 0.85;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(currentColor);
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    vec3 cur = imageLoad(currentColor, coord).rgb;
+    vec3 hist = imageLoad(historyColor, coord).rgb;
+
+    // Clamp history to avoid ghosting
+    vec3 minColor = min(cur, cur + 0.1);
+    vec3 maxColor = max(cur, cur + 0.1);
+    vec3 clampedHist = clamp(hist, minColor, maxColor);
+    vec3 final = mix(cur, clampedHist, blendFactor);
+
+    imageStore(historyColor, coord, vec4(final, 1.0));
+}

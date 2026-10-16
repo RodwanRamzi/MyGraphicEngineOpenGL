@@ -1,0 +1,52 @@
+#version 460 core
+layout(local_size_x = 8, local_size_y = 8) in;
+
+uniform vec2 screenSize;
+uniform vec3 camPos;
+uniform mat4 inverseViewMatrix;
+uniform mat4 inverseProjectionMatrix;
+uniform sampler2D gDepth;
+uniform sampler2D gPosition;
+uniform vec3 lightPos;
+uniform vec3 lightColor;
+uniform float lightIntensity;
+uniform float volumetricIntensity;
+
+layout(rgba16f, binding = 0) writeonly uniform image2D volumetricOutput;
+
+void main() {
+    vec2 uv = (gl_GlobalInvocationID.xy + 0.5) / screenSize;
+    if (uv.x > 1.0 || uv.y > 1.0) return;
+    
+    // الحصول على عمق البكسل
+    float depth = texture(gDepth, uv).r;
+    vec3 fragPos = texture(gPosition, uv).rgb;
+    
+    // حساب شعاع الكاميرا
+    vec3 viewDir = normalize(fragPos - camPos);
+    vec3 lightDir = normalize(lightPos - camPos);
+    
+    // Ray Marching على طول الشعاع
+    float stepSize = 0.1;
+    float maxDist = length(lightPos - camPos);
+    float totalDensity = 0.0;
+    float currentDist = 0.0;
+    
+    for (float t = 0.0; t < maxDist; t += stepSize) {
+        vec3 samplePos = camPos + viewDir * t;
+        vec3 sampleLightDir = normalize(lightPos - samplePos);
+        
+        // حساب كثافة الضوء في هذه النقطة
+        float distanceToLight = length(lightPos - samplePos);
+        float attenuation = 1.0 / (distanceToLight * distanceToLight + 1.0);
+        float density = exp(-distanceToLight * 0.1);
+        
+        totalDensity += density * attenuation * stepSize;
+    }
+    
+    // تطبيق التأثير
+    float visibility = exp(-totalDensity * volumetricIntensity);
+    vec3 volumetricColor = lightColor * lightIntensity * (1.0 - visibility);
+    
+    imageStore(volumetricOutput, ivec2(gl_GlobalInvocationID.xy), vec4(volumetricColor, 1.0));
+}

@@ -1,136 +1,19 @@
-# Visual Studio build files
-x64/
-.vs/
-Debug/
-Release/
-Shaders/
-*.exe
-*.pdb
-*.ilk
-*.obj
-*.log
-*.tlog
-*.idb
-*.ipch
-*.iobj
-*.ipdb
-*.recipe
-*.lastbuildstate
-*.Build.CppClean.log
-*.vcxproj.FileListAbsolute.txt
-
-# Large archives
-*.rar
-*.zip
-
-# Personal files
-*.ini
-*.user
-
-# MyGraphi.30cb0123 (temp folder)
-MyGraphi.30cb0123/
-
-echo .vs/ >> .gitignore
-echo x64/ >> .gitignore
-echo Debug/ >> .gitignore
-echo Release/ >> .gitignore
-echo *.obj >> .gitignore
-echo *.pdb >> .gitignore
-echo *.exe >> .gitignore
-echo *.dll >> .gitignore
-echo *.log >> .gitignore
-echo *.tmp >> .gitignore
-echo # >> .gitignore
-echo (c) >> .gitignore
-echo Aipconfig >> .gitignore
-echo Compressing >> .gitignore
-echo Counting >> .gitignore
-echo Delta >> .gitignore
-echo Enumerating >> .gitignore
-echo Everything >> .gitignore
-echo Microsoft >> .gitignore
-echo Successfully >> .gitignore
-echo Total >> .gitignore
-echo Uploading >> .gitignore
-echo Windows >> .gitignore
-echo Writing >> .gitignore
-echo cd >> .gitignore
-echo error >> .gitignore
-echo fatal >> .gitignore
-echo git >> .gitignore
-echo ipconfig >> .gitignore
-echo main >> .gitignore
-echo mkdir >> .gitignore
-echo move >> .gitignore
-echo operable >> .gitignore
-echo origin >> .gitignore
-echo ping >> .gitignore
-echo send-pack >> .gitignore
-echo winget >> .gitignore.vs/ 
-x64/ 
-Debug/ 
-Release/ 
-*.obj 
-*.pdb 
-*.exe 
-*.dll 
-*.log 
-*.tmp 
-# 
-(c) 
-Aipconfig 
-Compressing 
-Counting 
-Delta 
-Enumerating 
-Everything 
-Microsoft 
-Successfully 
-Total 
-Uploading 
-Windows 
-Writing 
-cd 
-error 
-fatal 
-git 
-ipconfig 
-main 
-mkdir 
-move 
-operable 
-origin 
-ping 
-send-pack 
-winget 
-
 # ============================================================
-#              Visual Studio / MSBuild — BUILD OUTPUTS ONLY
+#                    Rodwan Engine .gitignore
 # ============================================================
-/x64/
-/Debug/
-/Release/
-/.vs/
+
+# ---- Build outputs ----
 /build/
 /out/
 /bin/
 /obj/
+/x64/
+/Debug/
+/Release/
+/.vs/
+/MyGraphi.30cb0123/
 
-# ============================================================
-#              User-specific files
-# ============================================================
-*.user
-*.suo
-*.ncb
-*.sdf
-*.opensdf
-*.VC.db
-*.VC.VC.opendb
-imgui.ini
-
-# ============================================================
-#              Build artifacts in root (NOT Libraries/)
-# ============================================================
+# ---- MSVC artifacts (root only) ----
 /*.pdb
 /*.ilk
 /*.exp
@@ -139,28 +22,52 @@ imgui.ini
 /*.ipdb
 /*.log
 /*.tlog
+/*.user
+/*.suo
+/*.ncb
+/*.sdf
+/*.opensdf
+/*.VC.db
+/*.vcxproj.bak
+/*.recipe
 
-# ============================================================
-#              OS files
-# ============================================================
+# ---- Executables ----
+*.exe
+*.dll
+*.lib
+
+# ---- Archives ----
+*.rar
+*.zip
+*.7z
+
+# ---- Temp ----
+*.tmp
+*.log
+
+# ---- ImGui state ----
+imgui.ini
+
+# ---- OS ----
 Thumbs.db
 Desktop.ini
 .DS_Store
 
-# ============================================================
-#              Level backups
-# ============================================================
-Levels/*.bak
-*.tmp
+# ---- Accidental shell junk ----
+/cd
+/dir
+/echo
+/python
+/FETCH_HEAD
 
-# ============================================================
-#              IMPORTANT: Do NOT ignore these folders
-#              (they contain source assets and vendored libs)
-# ============================================================
-!Libraries/**
-!Models/**
-!cubemap/**
-!Scripts/**
-!Levels/**
+# ---- Never ignore these folders ----
 !shaders/**
+!luts/**
+!Scripts/**
+!scripts/**
+!cubemap/**
+!Levels/**
+!models/**
 !docs/**
+!screenshots/**
+!Libraries/**
