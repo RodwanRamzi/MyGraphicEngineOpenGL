@@ -84,7 +84,6 @@ The engine features a **Deferred PBR Renderer** with a 5-attachment G-Buffer, **
 
 - **Jolt Physics** — Box / Sphere / Capsule collisions, fixed 60 Hz timestep with interpolation
 - **Lua Scripting (sol2)** — 40+ API functions: transforms, materials, physics, camera, input, spawn, raycast, prefabs, game state, script parameters
-- **Async Loader** — Background thread pool for file preloading
 - **Texture Cache** — Hash map to avoid redundant loads
 - **Anisotropic Filtering** — 16× on all textures
 
