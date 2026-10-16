@@ -7,11 +7,11 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 <p align="center">
-  <b>A custom OpenGL 4.6 game engine with Deferred PBR Rendering, Cascaded Shadow Maps, Skeletal Animation, HDR, Bloom, Volumetric Fog, Physics, Lua Scripting, and a full ImGui Level Editor — built entirely from scratch in C++20.</b>
+  <b>A custom OpenGL 4.6 game engine with Deferred PBR Rendering, Cascaded Shadow Maps, Skeletal Animation, HDR, Bloom, Volumetric Fog, Physics, Lua Scripting, and a full ImGui Level Editor — built entirely from scratch in C++.</b>
 </p>
 
 <p align="center">
-  <img src="screenshots/hero.png" alt="Engine Screenshot" width="800"/>
+  <img src="screenshots/CSM+SK.png" alt="Engine Screenshot" width="800"/>
   <br>
   <i>Deferred PBR rendering with cascaded shadows, HDR tone mapping, and skinned animation</i>
 </p>
