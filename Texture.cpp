@@ -18,7 +18,7 @@ Texture::Texture(const char* image, const char* texType, GLuint slot)
     type = std::string(texType);
 
     int widthImg, heightImg, numColCh;
-    stbi_set_flip_vertically_on_load(true);
+    stbi_set_flip_vertically_on_load(false);
 
     std::cout << "[Texture] Loading: " << image << " (type=" << texType << ", slot=" << slot << ")" << std::endl;
 

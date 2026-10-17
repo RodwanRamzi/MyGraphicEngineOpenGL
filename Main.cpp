@@ -4,12 +4,14 @@
 namespace fs = std::filesystem;
 
 #include "Model.h"
-#include "FBXLoader.h"
+#include "AsyncLoader.h"
+//#include "FBXLoader.h"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include "shaderClass.h"
 #include "Camera.h"
+#include "CSM.h"
 #include <iostream>
 #include <vector>
 #include <string>
@@ -37,7 +39,36 @@ namespace fs = std::filesystem;
 #include "imgui_impl_opengl3.h"
 #include "ImGuizmo.h"
 
+#include "BloomPass.h"
+
 #include "ScriptComponent.h"
+#include "LUT.h"
+
+// ============================================================
+//              LUT LOADER (uses existing stb_image from Model.h)
+// ============================================================
+LUT loadLUTFromFile(const std::string& path, int lutSize = 32) {
+    LUT result;
+    int width, height, channels;
+    unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 3);
+
+    if (!data) {
+        std::cerr << "[LUT] Failed to load: " << path << std::endl;
+        return result;
+    }
+
+    if (width != lutSize * lutSize || height != lutSize) {
+        std::cerr << "[LUT] Wrong dimensions. Expected "
+            << lutSize * lutSize << "x" << lutSize
+            << " got " << width << "x" << height << std::endl;
+        stbi_image_free(data);
+        return result;
+    }
+
+    result.loadFromMemory(data, lutSize);
+    stbi_image_free(data);
+    return result;
+}
 
 // JOLT PHYSICS
 #include <Jolt/Jolt.h>
@@ -166,7 +197,7 @@ std::string FindSkyboxFace(const std::string& basePath, const std::vector<std::s
             return fullPath;
         }
     }
-    return "";  
+    return "";
 }
 
 // ============================================================
@@ -518,7 +549,7 @@ public:
         mObjectToBroadPhase[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
         mObjectToBroadPhase[Layers::MOVING] = BroadPhaseLayers::MOVING;
     }
-    virtual uint GetNumBroadPhaseLayers() const override { return BroadPhaseLayers::NUM_LAYERS; }
+    virtual uint GetNumBroadPhaseLayers() const { return BroadPhaseLayers::NUM_LAYERS; }
     virtual BroadPhaseLayer GetBroadPhaseLayer(ObjectLayer inLayer) const override {
         JPH_ASSERT(inLayer < Layers::NUM_LAYERS);
         return mObjectToBroadPhase[inLayer];
@@ -650,48 +681,82 @@ enum class EntityType {
     Ball,
     Camera,
     Empty,
-    PointLight,      
-    SpotLight,       
+    PointLight,
+    SpotLight,
     DirectionalLight,
     AmbientLight
 };
 
 struct Material {
+    // ---- Base Color / Albedo ----
     glm::vec3 albedo = glm::vec3(1.0f, 1.0f, 1.0f);
-    float metallic = 0.0f;
+    glm::vec4 baseColorFactor = glm::vec4(1.0f);      // ← جديد (glTF)
+
+    // ---- Metallic / Roughness ----
+    float metallic  = 0.0f;
     float roughness = 0.95f;
+
+    // ---- AO ----
     float ao = 1.0f;
+
+    // ---- Emissive ----
     float emissiveIntensity = 0.0f;
     glm::vec3 emissiveColor = glm::vec3(0.0f);
-    int useAlbedoMap = 1;
-    int useNormalMap = 0;
+    glm::vec3 emissiveFactor = glm::vec3(0.0f);       // ← جديد (glTF)
+    float emissiveStrength   = 1.0f;                  // ← جديد (KHR extension)
+
+    // ---- Normal ----
+    float normalStrength = 1.0f;                       // ← جديد
+
+    // ---- Flags: which maps to use ----
+    int useAlbedoMap            = 1;
+    int useNormalMap            = 0;
     int useMetallicRoughnessMap = 0;
-    int useAOMap = 0;
-    int useHeightMap = 0;
-    float heightScale = 0.05f;
-    int useEmissiveMap = 0;
+    int useAOMap                = 0;
+    int useHeightMap            = 0;
+    float heightScale           = 0.05f;
+    int useEmissiveMap          = 0;
 
-    // texture paths
-    std::string albedoMapPath = "";
-    std::string normalMapPath = "";
+    // ---- SSS ----
+    bool  sssEnabled   = false;
+    float sssIntensity = 1.0f;
+    float sssMask      = 0.0f;
+
+    // ---- Texture paths ----
+    std::string albedoMapPath            = "";
+    std::string normalMapPath            = "";
     std::string metallicRoughnessMapPath = "";
-    std::string aoMapPath = "";
-    std::string heightMapPath = "";
-    std::string emissiveMapPath = "";
+    std::string aoMapPath                = "";
+    std::string heightMapPath            = "";
+    std::string emissiveMapPath          = "";
 
-    // Texture IDs
-    GLuint customAlbedoID = 0;
-    GLuint customNormalID = 0;
-    GLuint customMRID = 0;
-    GLuint customAOID = 0;
-    GLuint customHeightID = 0;
+    // ---- Texture IDs ----
+    GLuint customAlbedoID   = 0;
+    GLuint customNormalID   = 0;
+    GLuint customMRID       = 0;
+    GLuint customAOID       = 0;
+    GLuint customHeightID   = 0;
     GLuint customEmissiveID = 0;
+
+    // ---- glTF presence flags (set at load time) ----
+    bool hasBaseColorTexture = false;
+    bool hasMRTexture        = false;
+    bool hasNormalTexture    = false;
+    bool hasEmissiveTexture  = false;
+    bool hasAOTexture        = false;
 };
 
 struct ScriptParam {
     std::string name;
     float value = 0.0f;
 };
+
+struct MaterialSlot {
+    int         meshIndex = 0;
+    std::string name      = "Material";
+    Material    material;
+};
+
 
 struct EditorEntity {
     Model* model;
@@ -703,23 +768,49 @@ struct EditorEntity {
     glm::vec3 velocity = glm::vec3(0.0f);
     std::shared_ptr<ScriptComponent> script = nullptr;
     Material material;
+
+    AnimationPlayer animPlayer;
+
     bool isCameraPossessed = false;
     bool simulatePhysics = false;
     BodyID physicsBodyID;
+    
+    std::vector<MaterialSlot> materialSlots;  
+    int selectedMaterialSlot = -1;
 
     struct LightProperties {
         bool enabled = true;
         glm::vec3 color = glm::vec3(1.0f, 1.0f, 1.0f);
         float intensity = 1.0f;
-        float range = 10.0f;        
-        float innerConeAngle = 15.0f;   
-        float outerConeAngle = 30.0f;  
-        float attenuation = 1.0f;       
+        float range = 10.0f;
+        float innerConeAngle = 15.0f;
+        float outerConeAngle = 30.0f;
+        float attenuation = 1.0f;
     } light;
 
     // ===== Script Parameters =====
     std::vector<ScriptParam> scriptParams;
+
+    float boundingRadius = 1.0f;
 };
+
+struct PendingModel {
+    std::string path;
+    std::shared_ptr<Model> model;  // ← Still Loading
+    bool ready = false;
+};
+
+struct ModelData {
+    std::vector<Vertex> vertices;
+    std::vector<GLuint> indices;
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    std::vector<glm::vec2> uvs;
+    std::vector<glm::ivec4> joints;
+    std::vector<glm::vec4> weights;
+    // ... باقي البيانات
+};
+
 
 void SpawnRandomLights(std::vector<EditorEntity>& entities, int count = 20, float range = 10.0f) {
     std::random_device rd;
@@ -731,12 +822,12 @@ void SpawnRandomLights(std::vector<EditorEntity>& entities, int count = 20, floa
 
     for (int i = 0; i < count; ++i) {
         EditorEntity lightEntity;
-        lightEntity.model = nullptr;         
+        lightEntity.model = nullptr;
         lightEntity.modelPath = "";
         lightEntity.position = glm::vec3(posDist(gen), 1.0f, posDist(gen));
         lightEntity.rotation = glm::vec3(0.0f);
         lightEntity.scale = glm::vec3(1.0f);
-        lightEntity.type = EntityType::PointLight; 
+        lightEntity.type = EntityType::PointLight;
         lightEntity.velocity = glm::vec3(0.0f);
         lightEntity.script = nullptr;
         lightEntity.isCameraPossessed = false;
@@ -746,7 +837,7 @@ void SpawnRandomLights(std::vector<EditorEntity>& entities, int count = 20, floa
         lightEntity.light.color = glm::vec3(colorDist(gen), colorDist(gen), colorDist(gen));
         lightEntity.light.intensity = intensityDist(gen);
         lightEntity.light.range = rangeDist(gen);
-        lightEntity.light.innerConeAngle = 15.0f;   
+        lightEntity.light.innerConeAngle = 15.0f;
         lightEntity.light.outerConeAngle = 30.0f;
         lightEntity.light.attenuation = 1.0f;
 
@@ -755,6 +846,7 @@ void SpawnRandomLights(std::vector<EditorEntity>& entities, int count = 20, floa
 
     std::cout << "[Lights] Spawned " << count << " random point lights." << std::endl;
 }
+
 
 struct DebugLine {
     glm::vec3 start;
@@ -798,6 +890,134 @@ std::vector<std::string> scanModelsFolder(const std::string& folderPath) {
         }
     }
     return modelFiles;
+}
+
+// ============================================================
+//      REBUILD MATERIAL SLOTS FROM MODEL MESHES
+// ============================================================
+void RebuildMaterialSlots(EditorEntity& entity, bool preserveExisting = false)
+{
+    if (!entity.model || entity.model->meshes.empty()) {
+        entity.materialSlots.clear();
+        entity.selectedMaterialSlot = -1;
+        return;
+    }
+
+    std::vector<MaterialSlot> newSlots;
+    newSlots.reserve(entity.model->meshes.size());
+
+    for (size_t mi = 0; mi < entity.model->meshes.size(); ++mi) {
+        const Mesh& m = entity.model->meshes[mi];
+
+        MaterialSlot slot;
+        slot.meshIndex = (int)mi;
+        slot.name      = "Material " + std::to_string(mi);
+
+        // Try to preserve existing slot values
+        bool preserved = false;
+        if (preserveExisting) {
+            for (const auto& old : entity.materialSlots) {
+                if (old.meshIndex == (int)mi) {
+                    slot.name = old.name;
+                    slot.material = old.material;
+                    preserved = true;
+                    break;
+                }
+            }
+        }
+
+        // If not preserved, copy from mesh glTF data
+        if (!preserved) {
+            slot.material.baseColorFactor   = m.baseColorFactor;
+            slot.material.albedo            = glm::vec3(m.baseColorFactor);
+            slot.material.metallic          = m.metallicFactor;
+            slot.material.roughness         = m.roughnessFactor;
+            slot.material.emissiveFactor    = m.emissiveFactor;
+            slot.material.emissiveColor     = m.emissiveFactor;
+            slot.material.emissiveStrength  = m.emissiveStrength;
+            slot.material.emissiveIntensity = m.emissiveStrength;
+
+            slot.material.hasBaseColorTexture = m.hasBaseColorTexture;
+            slot.material.hasMRTexture        = m.hasMRTexture;
+            slot.material.hasNormalTexture    = m.hasNormalTexture;
+            slot.material.hasEmissiveTexture  = m.hasEmissiveTexture;
+            slot.material.hasAOTexture        = m.hasAOTexture;
+
+            slot.material.useAlbedoMap            = m.hasBaseColorTexture ? 1 : 0;
+            slot.material.useMetallicRoughnessMap = m.hasMRTexture        ? 1 : 0;
+            slot.material.useNormalMap            = m.hasNormalTexture    ? 1 : 0;
+            slot.material.useEmissiveMap          = m.hasEmissiveTexture  ? 1 : 0;
+            slot.material.useAOMap                = m.hasAOTexture        ? 1 : 0;
+
+            // Copy textures from the mesh
+            for (const auto& tex : m.textures) {
+                if (tex.type == "diffuse" && tex.ID != 0) {
+                    slot.material.customAlbedoID = tex.ID;
+                    slot.material.albedoMapPath  = tex.path;
+                }
+                else if (tex.type == "normal" && tex.ID != 0) {
+                    slot.material.customNormalID = tex.ID;
+                    slot.material.normalMapPath  = tex.path;
+                }
+                else if (tex.type == "metallicRoughness" && tex.ID != 0) {
+                    slot.material.customMRID = tex.ID;
+                    slot.material.metallicRoughnessMapPath = tex.path;
+                }
+                else if (tex.type == "emissive" && tex.ID != 0) {
+                    slot.material.customEmissiveID = tex.ID;
+                    slot.material.emissiveMapPath  = tex.path;
+                }
+                else if (tex.type == "ao" && tex.ID != 0) {
+                    slot.material.customAOID = tex.ID;
+                    slot.material.aoMapPath  = tex.path;
+                }
+            }
+        }
+
+        newSlots.push_back(slot);
+    }
+
+    entity.materialSlots = newSlots;
+
+    if (entity.selectedMaterialSlot < 0 && !entity.materialSlots.empty()) {
+        entity.selectedMaterialSlot = 0;
+        entity.material = entity.materialSlots[0].material;
+    } else if (entity.selectedMaterialSlot >= (int)entity.materialSlots.size()) {
+        entity.selectedMaterialSlot = entity.materialSlots.empty() ? -1 : 0;
+    }
+}
+
+
+// ============================================================
+//        HELPER: Build a wireframe box from AABB
+// ============================================================
+void AppendBoxWireframe(std::vector<DebugLine>& lines,
+    const glm::vec3& bmin,
+    const glm::vec3& bmax,
+    const glm::vec3& color)
+{
+// 8 corners
+glm::vec3 c[8] = {
+{ bmin.x, bmin.y, bmin.z },
+{ bmax.x, bmin.y, bmin.z },
+{ bmax.x, bmax.y, bmin.z },
+{ bmin.x, bmax.y, bmin.z },
+{ bmin.x, bmin.y, bmax.z },
+{ bmax.x, bmin.y, bmax.z },
+{ bmax.x, bmax.y, bmax.z },
+{ bmin.x, bmax.y, bmax.z }
+};
+
+// 12 edges
+const int edges[12][2] = {
+{0,1},{1,2},{2,3},{3,0},   // bottom
+{4,5},{5,6},{6,7},{7,4},   // top
+{0,4},{1,5},{2,6},{3,7}    // verticals
+};
+
+for (int i = 0; i < 12; ++i) {
+lines.push_back({ c[edges[i][0]], c[edges[i][1]], color, 0.0f });
+}
 }
 
 struct Frustum {
@@ -868,8 +1088,8 @@ const char* debugViewNames[] = {
     "Albedo",
     "Metallic/Roughness",
     "Emissive",
-    "SSAO",
-    "Depth"
+    "Depth",
+    "Cascade coloring"
 };
 
 // ============================================================
@@ -877,6 +1097,8 @@ const char* debugViewNames[] = {
 // ============================================================
 int main()
 {
+    std::cerr << "=== MAIN START ===" << std::endl;   
+
     // 1. GLFW Init
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -897,10 +1119,42 @@ int main()
     Shader deferredLightingShader("deferred_lighting.vert", "deferred_lighting.frag");
     Shader depthShader("depth.vert", "depth.frag");
     Shader fxaaShader("fxaa.vert", "fxaa.frag");
-    Shader ssaoShader("ssao.vert", "ssao.frag");
     Shader lineShader("line.vert", "line.frag");
     Shader volumetricFogShader("volumetric_fog.vert", "volumetric_fog.frag");
     Shader skyboxShader("skybox.vert", "skybox.frag");
+    Shader ssrShader("ssr.vert", "ssr.frag");
+    Shader ssrCompositeShader("fullscreen.vert", "ssr_composite.frag");
+    Shader luminanceShader("luminance.vert", "luminance.frag");
+    Shader exposureShader("exposure.vert", "exposure.frag");
+    Shader csmShader("csm.vert", "csm.frag");
+    CSM csm;
+
+    static int csmDraws = 0;
+    csmDraws = 0;
+
+    // ============================================================
+    //  Cached uniform locations (lookup once, use everywhere)
+    // ============================================================
+    struct GBufferUniforms {
+        GLint camPos;
+        GLint emissiveMap0;
+        GLint uUseEmissiveMap;
+        GLint uSSSMask;
+        GLint uEmissiveColor;
+        GLint uEmissiveIntensity;
+        GLint uAlbedo;
+        GLint uMetallic;
+        GLint uRoughness;
+        GLint uAO;
+        GLint uUseAlbedoMap;
+        GLint uUseNormalMap;
+        GLint uUseMetallicRoughnessMap;
+        GLint uUseAOMap;
+        GLint useHeightMap;
+        GLint heightScale;
+        GLint heightMap;
+    } gbufLoc;
+
 
     // ---- Skybox variables ----
     bool showSkybox = true;
@@ -910,26 +1164,64 @@ int main()
     int selectedSkyboxIndex = 0;
     GLuint envCubemap = 0;
 
+    // ---- LUT Settings ----
+    LUT lut = loadLUTFromFile("luts/lut_mec.png", 32);
+    if (lut.textureID == 0) {
+        std::cerr << "[LUT] Load failed — running without LUT." << std::endl;
+    }
+    bool lutEnabled = false;
+    float lutStrength = 1.0f;
 
-    // Pre-cached uniforms
-    static GLint uAlbedoLoc = glGetUniformLocation(gBufferShader.ID, "uAlbedo");
-    static GLint uMetallicLoc = glGetUniformLocation(gBufferShader.ID, "uMetallic");
-    static GLint uRoughnessLoc = glGetUniformLocation(gBufferShader.ID, "uRoughness");
-    static GLint uAOLoc = glGetUniformLocation(gBufferShader.ID, "uAO");
-    static GLint uUseAlbedoMapLoc = glGetUniformLocation(gBufferShader.ID, "uUseAlbedoMap");
-    static GLint uUseNormalMapLoc = glGetUniformLocation(gBufferShader.ID, "uUseNormalMap");
-    static GLint uUseMetallicRoughnessMapLoc = glGetUniformLocation(gBufferShader.ID, "uUseMetallicRoughnessMap");
-    static GLint uUseAOMapLoc = glGetUniformLocation(gBufferShader.ID, "uUseAOMap");
-    static GLint uUseHeightMapLoc = glGetUniformLocation(gBufferShader.ID, "useHeightMap");
-    static GLint uHeightScaleLoc = glGetUniformLocation(gBufferShader.ID, "heightScale");
-    static GLint uHeightMapLoc = glGetUniformLocation(gBufferShader.ID, "heightMap");
-    static GLint uEmissiveColorLoc = glGetUniformLocation(gBufferShader.ID, "uEmissiveColor");
-    static GLint uEmissiveIntensityLoc = glGetUniformLocation(gBufferShader.ID, "uEmissiveIntensity");
+    // ---- Load SSS LUT ----
+    unsigned int sssLUTtexture = 0;
+    {
+        int w, h, ch;
+        unsigned char* data = stbi_load("luts/sss_lut.png", &w, &h, &ch, 1);
+        if (data) {
+            glGenTextures(1, &sssLUTtexture);
+            glBindTexture(GL_TEXTURE_2D, sssLUTtexture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, data);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            stbi_image_free(data);
+            std::cout << "✅ SSS LUT loaded (" << w << "x" << h << ")" << std::endl;
+        }
+        else {
+            std::cerr << "❌ SSS LUT not found: luts/sss_lut.png" << std::endl;
+        }
+    }
 
+    // ---- SSS Settings ----
+    bool  enableSSS = true;
+    float sssIntensity = 1.0f;
+    glm::vec3 sssColor = glm::vec3(1.0f, 0.3f, 0.2f);  // أحمر دموي
+    float sssWidth = 0.3f;
+
+    // ============================================================
+    //  Cache G-Buffer uniform locations (once)
+    // ============================================================
+    gbufLoc.camPos                   = glGetUniformLocation(gBufferShader.ID, "camPos");
+    gbufLoc.emissiveMap0             = glGetUniformLocation(gBufferShader.ID, "emissiveMap0");
+    gbufLoc.uUseEmissiveMap          = glGetUniformLocation(gBufferShader.ID, "uUseEmissiveMap");
+    gbufLoc.uSSSMask                 = glGetUniformLocation(gBufferShader.ID, "uSSSMask");
+    gbufLoc.uEmissiveColor           = glGetUniformLocation(gBufferShader.ID, "uEmissiveColor");
+    gbufLoc.uEmissiveIntensity       = glGetUniformLocation(gBufferShader.ID, "uEmissiveIntensity");
+    gbufLoc.uAlbedo                  = glGetUniformLocation(gBufferShader.ID, "uAlbedo");
+    gbufLoc.uMetallic                = glGetUniformLocation(gBufferShader.ID, "uMetallic");
+    gbufLoc.uRoughness               = glGetUniformLocation(gBufferShader.ID, "uRoughness");
+    gbufLoc.uAO                      = glGetUniformLocation(gBufferShader.ID, "uAO");
+    gbufLoc.uUseAlbedoMap            = glGetUniformLocation(gBufferShader.ID, "uUseAlbedoMap");
+    gbufLoc.uUseNormalMap            = glGetUniformLocation(gBufferShader.ID, "uUseNormalMap");
+    gbufLoc.uUseMetallicRoughnessMap = glGetUniformLocation(gBufferShader.ID, "uUseMetallicRoughnessMap");
+    gbufLoc.uUseAOMap                = glGetUniformLocation(gBufferShader.ID, "uUseAOMap");
+    gbufLoc.useHeightMap             = glGetUniformLocation(gBufferShader.ID, "useHeightMap");
+    gbufLoc.heightScale              = glGetUniformLocation(gBufferShader.ID, "heightScale");
+    gbufLoc.heightMap                = glGetUniformLocation(gBufferShader.ID, "heightMap");
+
+    // Deferred lighting uniforms
     static GLint uGEmissiveLoc = glGetUniformLocation(deferredLightingShader.ID, "gEmissive");
-    static GLint uEmissiveMapLoc = glGetUniformLocation(deferredLightingShader.ID, "emissiveMap");
-    static GLint uUseEmissiveMapLoc = glGetUniformLocation(deferredLightingShader.ID, "uUseEmissiveMap");
-
     static GLint uCameraMatrixLoc = glGetUniformLocation(deferredLightingShader.ID, "cameraMatrix");
     static GLint uCamPosLoc = glGetUniformLocation(deferredLightingShader.ID, "camPos");
     static GLint uViewMatrixLoc = glGetUniformLocation(deferredLightingShader.ID, "viewMatrix");
@@ -937,6 +1229,37 @@ int main()
 
     static GLint uVolLightPosLoc = glGetUniformLocation(volumetricFogShader.ID, "lightPos");
     static GLint uVolLightIntensityLoc = glGetUniformLocation(volumetricFogShader.ID, "volumetricLightIntensity");
+
+    std::vector<PendingModel> pendingModels;
+    std::mutex pendingMutex;
+
+    auto modelsReadyToBuild = std::make_shared<std::vector<std::string>>();
+    std::mutex modelsReadyMutex;
+
+    // دالة: حمّل ملف في الخلفية
+    auto PreloadFileAsync = [&](const std::string& path) {
+        AsyncLoader::Get().Submit([path, modelsReadyToBuild, &modelsReadyMutex]() {
+            // اقرأ الملف في الـ background
+            std::ifstream file(path, std::ios::binary);
+            if (!file) {
+                std::cerr << "[Async] Failed to open: " << path << std::endl;
+                return;
+            }
+    
+            // اقرأ المحتوى
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+    
+            std::cout << "[Async] Preloaded: " << path 
+                    << " (" << buffer.str().size() << " bytes)" << std::endl;
+    
+            // لما يخلص، ضيفه للقائمة
+            AsyncLoader::Get().PostToMain([path, modelsReadyToBuild, &modelsReadyMutex]() {
+                std::lock_guard<std::mutex> lock(modelsReadyMutex);
+                modelsReadyToBuild->push_back(path);
+            });
+        });
+    };
 
     // ---- Script cache ----
     std::vector<std::string> scriptFiles;
@@ -1031,6 +1354,10 @@ int main()
     glGenTextures(1, &gDepth);
     glBindTexture(GL_TEXTURE_2D, gDepth);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, width, height, 0,
+        GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, gDepth, 0);
@@ -1044,8 +1371,68 @@ int main()
 
     // Final Color FBO
     unsigned int finalColorTexture, finalColorFBO;
+    BloomPass* bloomPass = new BloomPass(width, height);
     glGenTextures(1, &finalColorTexture);
     glBindTexture(GL_TEXTURE_2D, finalColorTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   // ← no mipmap dependency
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+
+    // ==========================================
+    // Auto Exposure Setup
+    // ==========================================
+    unsigned int luminanceFBO, luminanceTex;
+    glGenFramebuffers(1, &luminanceFBO);
+    glGenTextures(1, &luminanceTex);
+    glBindTexture(GL_TEXTURE_2D, luminanceTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, 1, 1, 0, GL_RED, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, luminanceFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, luminanceTex, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // Ping-pong: اثنين exposure textures (1x1)
+    unsigned int exposureFBO[2], exposureTex[2];
+    glGenFramebuffers(2, exposureFBO);
+    glGenTextures(2, exposureTex);
+    for (int i = 0; i < 2; i++) {
+        glBindTexture(GL_TEXTURE_2D, exposureTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, 1, 1, 0, GL_RED, GL_FLOAT, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, exposureFBO[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, exposureTex[i], 0);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    GLuint exposurePBO[2];
+    glGenBuffers(2, exposurePBO);
+    for (int i = 0; i < 2; i++) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, exposurePBO[i]);
+        glBufferData(GL_PIXEL_PACK_BUFFER, sizeof(float), nullptr, GL_STREAM_READ);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    int exposurePBOIdx = 0;
+    bool pboFirstFrame = true;
+
+    // تهيئة بقيمة 1.0 (عشان أول فريم)
+    float initExposure = 1.0f;
+    for (int i = 0; i < 2; i++) {
+        glBindTexture(GL_TEXTURE_2D, exposureTex[i]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RED, GL_FLOAT, &initExposure);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    int exposurePingPong = 0;
+
+    // Bloom texture
+    unsigned int bloomTexture;
+    glGenTextures(1, &bloomTexture);
+    glBindTexture(GL_TEXTURE_2D, bloomTexture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -1055,6 +1442,12 @@ int main()
     glGenFramebuffers(1, &finalColorFBO);
     glBindFramebuffer(GL_FRAMEBUFFER, finalColorFBO);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, finalColorTexture, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, bloomTexture, 0);
+
+    // Tell OpenGL we have 2 color attachments
+    unsigned int attachmentsFinal[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+    glDrawBuffers(2, attachmentsFinal);
+
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
         std::cout << "Final Color FBO not complete!" << std::endl;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1149,7 +1542,7 @@ int main()
             std::cout << "[Skybox] No subfolders found. Using base folder." << std::endl;
         }
     }
-    
+
 
     // 7. Shadow Map
     const unsigned int SHADOW_WIDTH = 2048, SHADOW_HEIGHT = 2048;
@@ -1183,17 +1576,21 @@ int main()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // 9. SSAO Setup (reduced samples for performance)
-    unsigned int ssaoFBO, ssaoColorBuffer;
-    glGenFramebuffers(1, &ssaoFBO);
-    glGenTextures(1, &ssaoColorBuffer);
-    glBindTexture(GL_TEXTURE_2D, ssaoColorBuffer);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, width, height, 0, GL_RED, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssaoColorBuffer, 0);
+    // ==========================================
+    // SSR Setup
+    // ==========================================
+    unsigned int ssrFBO, ssrColorBuffer;
+    glGenFramebuffers(1, &ssrFBO);
+    glGenTextures(1, &ssrColorBuffer);
+    glBindTexture(GL_TEXTURE_2D, ssrColorBuffer);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssrColorBuffer, 0);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        std::cout << "SSAO FBO not complete!" << std::endl;
+        std::cout << "SSR FBO not complete!" << std::endl;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     unsigned int noiseTexture;
@@ -1211,17 +1608,6 @@ int main()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glBindTexture(GL_TEXTURE_2D, 0);
-
-    // Reduced SSAO samples from 64 to 32
-    std::vector<glm::vec3> ssaoSamples(32);
-    for (unsigned int i = 0; i < 32; i++) {
-        glm::vec3 sample = glm::vec3(glm::linearRand(-1.0f, 1.0f), glm::linearRand(-1.0f, 1.0f), glm::linearRand(0.0f, 1.0f));
-        sample = glm::normalize(sample);
-        float scale = (float)i / 32.0f;
-        scale = 0.1f + 0.9f * scale * scale;
-        sample *= scale;
-        ssaoSamples[i] = sample;
-    }
 
     // 10. Line VAO/VBO
     unsigned int lineVAO, lineVBO;
@@ -1263,18 +1649,49 @@ int main()
     float customCloudOpacity = 0.3f;
     static int selectedSky = 0;
 
+    float ambientIntensity = 1.0f;   // 1 = شغّال، 0 = مطفّي
+    GLint uAmbientIntensity = glGetUniformLocation(deferredLightingShader.ID, "ambientIntensity");
+
     // 13. Post-processing (defaults)
-    bool enableSSAO = true;
-    float ssaoRadius = 0.5f;
-    float ssaoBias = 0.025f;
-    float ssaoPower = 2.0f;
     bool enableBloom = true;
-    float bloomThreshold = 0.5f;
-    float bloomIntensity = 0.4f;
+    float bloomThreshold = 1.0f;
+    float bloomIntensity = 1.0f;
+    float bloomCompositeStrength = 2.0f;
     float saturation = 1.0f;
     float contrast = 1.0f;
     float gamma = 2.2f;
     float exposure = 1.5f;
+
+    bool  enableSharpening = false;
+    float sharpeningStrength = 1.0f;
+
+    bool  enableVignette = true;
+    float vignetteStrength = 0.5f;
+    float vignetteRadius = 0.8f;
+
+    bool  enableChromaticAberration = false;
+    float chromaticStrength = 0.005f;
+
+    bool  enableFilmGrain = false;
+    float grainStrength = 0.05f;
+
+    // ---- Auto Exposure Settings ----
+    bool  enableAutoExposure = false;
+    float minExposure = 0.3f;       // ← Slider 1 (أدنى حد)
+    float maxExposure = 3.0f;       // ← Slider 2 (أقصى حد)
+    float keyValue = 0.18f;
+    float adaptationSpeed = 2.0f;   // سرعة التكيف
+    float currentExposure = 1.0f;   // قيمة حالية (تتحول كل فريم)
+
+    // ==========================================
+    // SSR Settings
+    // ==========================================
+    bool  enableSSR = false;
+    float ssrIntensity = 1.0f;
+    float ssrMaxDistance = 30.0f;
+    float ssrThickness = 0.5f;
+    int   ssrMaxSteps = 64;
+    float ssrResolution = 1.0f;
 
     // ---- Volumetric Fog ----
     bool enableVolumetricFog = false;
@@ -1328,8 +1745,16 @@ int main()
     // 17. Entities
     std::vector<EditorEntity> entities;
     entities.reserve(256);
+
     std::vector<DebugLine> debugLines;
     debugLines.reserve(1024);
+    std::vector<DebugLine> gizmoLines;
+    gizmoLines.reserve(2048);
+    // Debug selection box
+    bool showMaterialDebugBox = true;   // toggle in UI
+    glm::vec3 materialDebugBoxColor = glm::vec3(1.0f, 0.8f, 0.0f); // orange-yellow
+    bool showLightGizmos = true;
+
     std::vector<Prefab> prefabs;
     prefabs.reserve(32);
     int selectedEntity = -1;
@@ -1352,6 +1777,10 @@ int main()
         false,
         false
         });
+
+    if (loadedModels[0]) {
+        entities.back().boundingRadius = loadedModels[0]->GetBoundingRadius() * 1.5f;  // 1.5 = scale
+    }
 
     // 18. Game state
     int gameScore = 0;
@@ -1490,7 +1919,7 @@ int main()
     // ============================================================
     sol::state lua;
     lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::string, sol::lib::table);
-    
+
     // Logging and Time
     lua.set_function("log", [](const std::string& msg) { std::cout << "[Lua]: " << msg << std::endl; });
     lua.set_function("get_time", []() -> float { return (float)glfwGetTime(); });
@@ -1963,50 +2392,214 @@ int main()
     char newLevelNameBuffer[128] = "";
 
     auto saveLevel = [&]() {
-        std::ostringstream oss;
-        for (const auto& entity : entities) {
-            oss << entity.modelPath << '|'
-                << entity.position.x << '|' << entity.position.y << '|' << entity.position.z << '|'
-                << entity.rotation.x << '|' << entity.rotation.y << '|' << entity.rotation.z << '|'
-                << entity.scale.x << '|' << entity.scale.y << '|' << entity.scale.z << '|'
-                << static_cast<int>(entity.type) << '|'
-                << (entity.script && entity.script->isLoaded() ? entity.script->scriptPath : "") << '|'
-                << entity.isCameraPossessed << '|'
-                << entity.material.albedo.x << '|' << entity.material.albedo.y << '|' << entity.material.albedo.z << '|'
-                << entity.material.metallic << '|' << entity.material.roughness << '|' << entity.material.ao << '|'
-                << entity.material.emissiveColor.x << '|' << entity.material.emissiveColor.y << '|' << entity.material.emissiveColor.z << '|'
-                << entity.material.emissiveIntensity << '|'
-                << entity.material.useAlbedoMap << '|'
-                << entity.material.useNormalMap << '|'
-                << entity.material.useMetallicRoughnessMap << '|'
-                << entity.material.useAOMap << '|'
-                << entity.material.albedoMapPath << '|'
-                << entity.material.normalMapPath << '|'
-                << entity.material.metallicRoughnessMapPath << '|'
-                << entity.material.aoMapPath << '|'
-                << entity.material.heightMapPath << '|'
-                << entity.material.useEmissiveMap << '|'
-                << entity.material.emissiveMapPath << '|'
-                << entity.simulatePhysics << '|';
-            // Serialize script params as: name1=val1;name2=val2;...
-            for (size_t i = 0; i < entity.scriptParams.size(); ++i) {
-                if (i > 0) oss << ';';
-                oss << entity.scriptParams[i].name << '=' << entity.scriptParams[i].value;
-            }
-            oss << '\n';
-
-
-        }
         std::ofstream file(levelPath);
-        if (file.is_open()) {
-            file << oss.str();
-            file.close();
-            std::cout << "Saved level to " << levelPath << std::endl;
-        }
-        else {
+        if (!file.is_open()) {
             std::cout << "Failed to open: " << levelPath << std::endl;
+            return;
         }
-        };
+    
+        file << "# Rodwan Engine Level File v2\n";
+        file << "VERSION=2\n";
+        file << "ENTITY_COUNT=" << entities.size() << "\n";
+    
+        // ============================================================
+        //                      ENTITIES
+        // ============================================================
+        for (size_t i = 0; i < entities.size(); ++i) {
+            const auto& e = entities[i];
+    
+            file << "\nENTITY_BEGIN\n";
+            file << "modelPath=" << e.modelPath << "\n";
+            file << "type=" << (int)e.type << "\n";
+            file << "position=" << e.position.x << "," << e.position.y << "," << e.position.z << "\n";
+            file << "rotation=" << e.rotation.x << "," << e.rotation.y << "," << e.rotation.z << "\n";
+            file << "scale=" << e.scale.x << "," << e.scale.y << "," << e.scale.z << "\n";
+            file << "velocity=" << e.velocity.x << "," << e.velocity.y << "," << e.velocity.z << "\n";
+            file << "isCameraPossessed=" << (e.isCameraPossessed ? 1 : 0) << "\n";
+            file << "simulatePhysics=" << (e.simulatePhysics ? 1 : 0) << "\n";
+            file << "selectedMaterialSlot=" << e.selectedMaterialSlot << "\n";
+    
+            // Script
+            if (e.script && e.script->isLoaded()) {
+                file << "scriptPath=" << e.script->scriptPath << "\n";
+            }
+    
+            // Script params
+            file << "scriptParamCount=" << e.scriptParams.size() << "\n";
+            for (const auto& p : e.scriptParams) {
+                file << "scriptParam=" << p.name << "," << p.value << "\n";
+            }
+    
+            // Light
+            file << "lightEnabled=" << (e.light.enabled ? 1 : 0) << "\n";
+            file << "lightColor=" << e.light.color.x << "," << e.light.color.y << "," << e.light.color.z << "\n";
+            file << "lightIntensity=" << e.light.intensity << "\n";
+            file << "lightRange=" << e.light.range << "\n";
+            file << "lightInnerCone=" << e.light.innerConeAngle << "\n";
+            file << "lightOuterCone=" << e.light.outerConeAngle << "\n";
+            file << "lightAttenuation=" << e.light.attenuation << "\n";
+    
+            // Material (helper)
+            auto writeMaterial = [&](const std::string& prefix, const Material& m) {
+                file << prefix << "albedo=" << m.albedo.x << "," << m.albedo.y << "," << m.albedo.z << "\n";
+                file << prefix << "baseColorFactor=" << m.baseColorFactor.x << "," << m.baseColorFactor.y
+                     << "," << m.baseColorFactor.z << "," << m.baseColorFactor.w << "\n";
+                file << prefix << "metallic=" << m.metallic << "\n";
+                file << prefix << "roughness=" << m.roughness << "\n";
+                file << prefix << "ao=" << m.ao << "\n";
+                file << prefix << "emissiveColor=" << m.emissiveColor.x << "," << m.emissiveColor.y << "," << m.emissiveColor.z << "\n";
+                file << prefix << "emissiveFactor=" << m.emissiveFactor.x << "," << m.emissiveFactor.y << "," << m.emissiveFactor.z << "\n";
+                file << prefix << "emissiveIntensity=" << m.emissiveIntensity << "\n";
+                file << prefix << "emissiveStrength=" << m.emissiveStrength << "\n";
+                file << prefix << "normalStrength=" << m.normalStrength << "\n";
+                file << prefix << "heightScale=" << m.heightScale << "\n";
+                file << prefix << "sssEnabled=" << (m.sssEnabled ? 1 : 0) << "\n";
+                file << prefix << "sssIntensity=" << m.sssIntensity << "\n";
+                file << prefix << "sssMask=" << m.sssMask << "\n";
+                file << prefix << "useAlbedoMap=" << m.useAlbedoMap << "\n";
+                file << prefix << "useNormalMap=" << m.useNormalMap << "\n";
+                file << prefix << "useMetallicRoughnessMap=" << m.useMetallicRoughnessMap << "\n";
+                file << prefix << "useAOMap=" << m.useAOMap << "\n";
+                file << prefix << "useHeightMap=" << m.useHeightMap << "\n";
+                file << prefix << "useEmissiveMap=" << m.useEmissiveMap << "\n";
+                file << prefix << "albedoMapPath=" << m.albedoMapPath << "\n";
+                file << prefix << "normalMapPath=" << m.normalMapPath << "\n";
+                file << prefix << "metallicRoughnessMapPath=" << m.metallicRoughnessMapPath << "\n";
+                file << prefix << "aoMapPath=" << m.aoMapPath << "\n";
+                file << prefix << "heightMapPath=" << m.heightMapPath << "\n";
+                file << prefix << "emissiveMapPath=" << m.emissiveMapPath << "\n";
+            };
+    
+            writeMaterial("material.", e.material);
+    
+            // Material Slots
+            file << "slotCount=" << e.materialSlots.size() << "\n";
+            for (size_t s = 0; s < e.materialSlots.size(); ++s) {
+                const auto& slot = e.materialSlots[s];
+                std::string p = "slot" + std::to_string(s) + ".";
+                file << p << "meshIndex=" << slot.meshIndex << "\n";
+                file << p << "name=" << slot.name << "\n";
+                writeMaterial(p, slot.material);
+            }
+    
+            file << "ENTITY_END\n";
+        }
+    
+        // ============================================================
+        //                    POST-PROCESSING
+        // ============================================================
+        file << "\nPOST_PROCESS_BEGIN\n";
+    
+        file << "enableBloom=" << (enableBloom ? 1 : 0) << "\n";
+        file << "bloomThreshold=" << bloomThreshold << "\n";
+        file << "bloomIntensity=" << bloomIntensity << "\n";
+        file << "bloomCompositeStrength=" << bloomCompositeStrength << "\n";
+    
+        file << "saturation=" << saturation << "\n";
+        file << "contrast=" << contrast << "\n";
+        file << "gamma=" << gamma << "\n";
+        file << "exposure=" << exposure << "\n";
+    
+        file << "enableSharpening=" << (enableSharpening ? 1 : 0) << "\n";
+        file << "sharpeningStrength=" << sharpeningStrength << "\n";
+    
+        file << "enableVignette=" << (enableVignette ? 1 : 0) << "\n";
+        file << "vignetteStrength=" << vignetteStrength << "\n";
+        file << "vignetteRadius=" << vignetteRadius << "\n";
+    
+        file << "enableChromaticAberration=" << (enableChromaticAberration ? 1 : 0) << "\n";
+        file << "chromaticStrength=" << chromaticStrength << "\n";
+    
+        file << "enableFilmGrain=" << (enableFilmGrain ? 1 : 0) << "\n";
+        file << "grainStrength=" << grainStrength << "\n";
+    
+        file << "enableAutoExposure=" << (enableAutoExposure ? 1 : 0) << "\n";
+        file << "minExposure=" << minExposure << "\n";
+        file << "maxExposure=" << maxExposure << "\n";
+        file << "keyValue=" << keyValue << "\n";
+        file << "adaptationSpeed=" << adaptationSpeed << "\n";
+    
+        file << "enableSSR=" << (enableSSR ? 1 : 0) << "\n";
+        file << "ssrIntensity=" << ssrIntensity << "\n";
+        file << "ssrMaxDistance=" << ssrMaxDistance << "\n";
+        file << "ssrThickness=" << ssrThickness << "\n";
+        file << "ssrMaxSteps=" << ssrMaxSteps << "\n";
+        file << "ssrResolution=" << ssrResolution << "\n";
+    
+        file << "enableVolumetricFog=" << (enableVolumetricFog ? 1 : 0) << "\n";
+        file << "fogDensity=" << fogDensity << "\n";
+        file << "fogHeight=" << fogHeight << "\n";
+        file << "fogFalloff=" << fogFalloff << "\n";
+        file << "fogSteps=" << fogSteps << "\n";
+        file << "fogMaxDistance=" << fogMaxDistance << "\n";
+        file << "fogColor=" << fogColor.x << "," << fogColor.y << "," << fogColor.z << "\n";
+    
+        file << "enableContactShadows=" << (enableContactShadows ? 1 : 0) << "\n";
+        file << "enableFXAA=" << (enableFXAA ? 1 : 0) << "\n";
+    
+        file << "enableSSS=" << (enableSSS ? 1 : 0) << "\n";
+        file << "sssIntensityGlobal=" << sssIntensity << "\n";
+        file << "sssColor=" << sssColor.x << "," << sssColor.y << "," << sssColor.z << "\n";
+        file << "sssWidth=" << sssWidth << "\n";
+    
+        file << "lutEnabled=" << (lutEnabled ? 1 : 0) << "\n";
+        file << "lutStrength=" << lutStrength << "\n";
+    
+        file << "showSkybox=" << (showSkybox ? 1 : 0) << "\n";
+        file << "enableEnvReflections=" << (enableEnvReflections ? 1 : 0) << "\n";
+        file << "envReflectionIntensity=" << envReflectionIntensity << "\n";
+        file << "ambientIntensity=" << ambientIntensity << "\n";
+    
+        file << "skyTopColor=" << customTopColor.x << "," << customTopColor.y << "," << customTopColor.z << "\n";
+        file << "skyHorizonColor=" << customHorizonColor.x << "," << customHorizonColor.y << "," << customHorizonColor.z << "\n";
+        file << "skyBottomColor=" << customBottomColor.x << "," << customBottomColor.y << "," << customBottomColor.z << "\n";
+        file << "sunColor=" << customSunColor.x << "," << customSunColor.y << "," << customSunColor.z << "\n";
+        file << "sunDirection=" << customSunDirection.x << "," << customSunDirection.y << "," << customSunDirection.z << "\n";
+        file << "sunIntensity=" << customSunIntensity << "\n";
+        file << "cloudDensity=" << customCloudDensity << "\n";
+        file << "cloudOpacity=" << customCloudOpacity << "\n";
+    
+        file << "POST_PROCESS_END\n";
+    
+        // ============================================================
+        //                     EDITOR STATE
+        // ============================================================
+        file << "\nEDITOR_STATE_BEGIN\n";
+        file << "editorFOV=" << editorFOV << "\n";
+        file << "gameFOV=" << gameFOV << "\n";
+        file << "cameraPosition=" << camera.Position.x << "," << camera.Position.y << "," << camera.Position.z << "\n";
+        file << "cameraOrientation=" << camera.Orientation.x << "," << camera.Orientation.y << "," << camera.Orientation.z << "\n";
+        file << "currentSkyboxFolder=" << currentSkyboxFolder << "\n";
+        file << "selectedSkyboxIndex=" << selectedSkyboxIndex << "\n";
+        file << "EDITOR_STATE_END\n";
+    
+        file.close();
+        std::cout << "[Level] Saved: " << levelPath
+                  << " (" << entities.size() << " entities + post-processing)" << std::endl;
+    };
+    
+    // ---- Helpers (ضعهم قبل loadLevel أو داخل main) ----
+    auto parseVec3Str = [](const std::string& s) -> glm::vec3 {
+        std::stringstream ss(s);
+        std::string tok;
+        float v[3] = { 0, 0, 0 };
+        int i = 0;
+        while (std::getline(ss, tok, ',') && i < 3) {
+            try { v[i++] = std::stof(tok); } catch (...) {}
+        }
+        return glm::vec3(v[0], v[1], v[2]);
+    };
+
+    auto parseVec4Str = [](const std::string& s) -> glm::vec4 {
+        std::stringstream ss(s);
+        std::string tok;
+        float v[4] = { 1, 1, 1, 1 };
+        int i = 0;
+        while (std::getline(ss, tok, ',') && i < 4) {
+            try { v[i++] = std::stof(tok); } catch (...) {}
+        }
+        return glm::vec4(v[0], v[1], v[2], v[3]);
+    };
 
     auto loadLevel = [&]() {
         std::ifstream file(levelPath);
@@ -2014,179 +2607,313 @@ int main()
             std::cout << "Failed to open: " << levelPath << std::endl;
             return;
         }
+
         pushUndo();
         entities.clear();
         selectedEntity = -1;
+
         std::string line;
-        while (std::getline(file, line)) {
-            if (line.empty()) continue;
-            std::stringstream ss(line);
-            std::string path;
-            std::getline(ss, path, '|');
-            float px, py, pz, rx, ry, rz, sx, sy, sz;
-            ss >> px; ss.ignore(); ss >> py; ss.ignore(); ss >> pz;
-            ss.ignore();
-            ss >> rx; ss.ignore(); ss >> ry; ss.ignore(); ss >> rz;
-            ss.ignore();
-            ss >> sx; ss.ignore(); ss >> sy; ss.ignore(); ss >> sz;
-            ss.ignore();
+        EditorEntity current;
+        Material currentMat;
+        std::vector<MaterialSlot> currentSlots;
+        std::vector<ScriptParam> currentParams;
+        std::string currentScriptPath;
+        bool inEntity = false;
+        enum { SECTION_NONE, SECTION_PP, SECTION_EDITOR } section = SECTION_NONE;
 
-            int typeInt = 0;
-            ss >> typeInt;
-            ss.ignore();
-
-            std::string scriptPath;
-            std::getline(ss, scriptPath, '|');
-
-            bool isPossessed = false;
-            ss >> isPossessed;
-            ss.ignore();
-
-            float albedoR, albedoG, albedoB, metallic, roughness, ao;
-            float emissiveR, emissiveG, emissiveB, emissiveIntensity;
-            bool useAlbedoMap, useNormalMap, useMetallicRoughnessMap, useAOMap;
-            int useEmissiveMap;
-            std::string emissiveMapPath;
-
-            ss >> albedoR; ss.ignore();
-            ss >> albedoG; ss.ignore();
-            ss >> albedoB; ss.ignore();
-            ss >> metallic; ss.ignore();
-            ss >> roughness; ss.ignore();
-            ss >> ao; ss.ignore();
-            ss >> emissiveR; ss.ignore();
-            ss >> emissiveG; ss.ignore();
-            ss >> emissiveB; ss.ignore();
-            ss >> emissiveIntensity; ss.ignore();
-            ss >> useAlbedoMap; ss.ignore();
-            ss >> useNormalMap; ss.ignore();
-            ss >> useMetallicRoughnessMap; ss.ignore();
-            ss >> useAOMap; ss.ignore();
-            ss >> useEmissiveMap; ss.ignore();
-
-            std::string albedoMapPath, normalMapPath, metallicRoughnessMapPath, aoMapPath, heightMapPath;
-            std::getline(ss, albedoMapPath, '|');
-            std::getline(ss, normalMapPath, '|');
-            std::getline(ss, metallicRoughnessMapPath, '|');
-            std::getline(ss, aoMapPath, '|');
-            std::getline(ss, heightMapPath, '|');
-            std::getline(ss, emissiveMapPath, '|');
-
-            bool simulatePhysics = false;
-            ss >> simulatePhysics;
-            ss.ignore();  // consume '|'
-
-            // Read params string (rest of line)
-            std::string paramsStr;
-            std::getline(ss, paramsStr);
-
-            std::vector<ScriptParam> loadedParams;
-            if (!paramsStr.empty()) {
-                std::stringstream ps(paramsStr);
-                std::string pair;
-                while (std::getline(ps, pair, ';')) {
-                    size_t eq = pair.find('=');
-                    if (eq != std::string::npos) {
-                        ScriptParam p;
-                        p.name = pair.substr(0, eq);
-                        p.value = std::stof(pair.substr(eq + 1));
-                        loadedParams.push_back(p);
-                    }
-                }
-            }
-
-            int modelIndex = -1;
-            for (int i = 0; i < (int)modelPaths.size(); ++i) {
-                if (modelPaths[i] == path) { modelIndex = i; break; }
-            }
-            if (modelIndex == -1) {
-                if (fs::exists(path)) {
-                    Model* newModel = new Model(path.c_str());
-                    loadedModels.push_back(newModel);
-                    modelPaths.push_back(path);
-                    modelIndex = loadedModels.size() - 1;
-                    std::cout << "[Load] Loaded model: " << path << std::endl;
-                }
-                else {
-                    std::cerr << "[Load] Model not found: " << path << std::endl;
-                    continue;
-                }
-            }
-
-            if (modelIndex != -1) {
-                EditorEntity ent;
-                ent.model = loadedModels[modelIndex];
-                ent.modelPath = path;
-                ent.position = glm::vec3(px, py, pz);
-                ent.rotation = glm::vec3(rx, ry, rz);
-                ent.scale = glm::vec3(sx, sy, sz);
-                ent.type = static_cast<EntityType>(typeInt);
-                ent.isCameraPossessed = isPossessed;
-                ent.simulatePhysics = simulatePhysics;
-                ent.scriptParams = loadedParams;
-
-                ent.material.albedo = glm::vec3(albedoR, albedoG, albedoB);
-                ent.material.metallic = metallic;
-                ent.material.roughness = roughness;
-                ent.material.ao = ao;
-                ent.material.emissiveColor = glm::vec3(emissiveR, emissiveG, emissiveB);
-                ent.material.emissiveIntensity = emissiveIntensity;
-                ent.material.useAlbedoMap = useAlbedoMap;
-                ent.material.useNormalMap = useNormalMap;
-                ent.material.useMetallicRoughnessMap = useMetallicRoughnessMap;
-                ent.material.useAOMap = useAOMap;
-
-                ent.material.albedoMapPath = albedoMapPath;
-                ent.material.normalMapPath = normalMapPath;
-                ent.material.metallicRoughnessMapPath = metallicRoughnessMapPath;
-                ent.material.aoMapPath = aoMapPath;
-                ent.material.heightMapPath = heightMapPath;
-
-                ent.material.useEmissiveMap = useEmissiveMap;
-                ent.material.emissiveMapPath = emissiveMapPath;
-                if (!emissiveMapPath.empty() && fs::exists(emissiveMapPath)) {
-                    ent.material.customEmissiveID = LoadTextureFromFile(emissiveMapPath);
-                }
-
-                if (!albedoMapPath.empty() && fs::exists(albedoMapPath)) {
-                    ent.material.customAlbedoID = LoadTextureFromFile(albedoMapPath);
-                    ent.material.useAlbedoMap = 1;
-                }
-                if (!normalMapPath.empty() && fs::exists(normalMapPath)) {
-                    ent.material.customNormalID = LoadTextureFromFile(normalMapPath);
-                    ent.material.useNormalMap = 1;
-                }
-                if (!metallicRoughnessMapPath.empty() && fs::exists(metallicRoughnessMapPath)) {
-                    ent.material.customMRID = LoadTextureFromFile(metallicRoughnessMapPath);
-                    ent.material.useMetallicRoughnessMap = 1;
-                }
-                if (!aoMapPath.empty() && fs::exists(aoMapPath)) {
-                    ent.material.customAOID = LoadTextureFromFile(aoMapPath);
-                    ent.material.useAOMap = 1;
-                }
-                if (!heightMapPath.empty() && fs::exists(heightMapPath)) {
-                    ent.material.customHeightID = LoadTextureFromFile(heightMapPath);
-                    ent.material.useHeightMap = 1;
-                }
-
-                entities.push_back(ent);
-
-                if (simulatePhysics) {
-                    GeneratePhysicsBody(entities.back());
-                }
-                if (!scriptPath.empty()) {
-                    int idx = entities.size() - 1;
-                    entities[idx].script = std::make_shared<ScriptComponent>(lua, scriptPath, idx);
-                    if (entities[idx].script->isLoaded()) {
-                        entities[idx].script->start();
-                    }
-                }
-            }
-        }
-        file.close();
-        std::cout << "Loaded level from " << levelPath << std::endl;
+        auto reloadTextureSafe = [](const std::string& path) -> GLuint {
+            if (!path.empty() && fs::exists(path)) return LoadTextureFromFile(path);
+            return 0;
         };
 
+        auto parseMaterialKey = [](const std::string& key, const std::string& val, Material& m,
+                                const std::function<glm::vec3(const std::string&)>& pv3,
+                                const std::function<glm::vec4(const std::string&)>& pv4) {
+            try {
+                if      (key == "albedo")                  m.albedo = pv3(val);
+                else if (key == "baseColorFactor")         m.baseColorFactor = pv4(val);
+                else if (key == "metallic")                m.metallic = std::stof(val);
+                else if (key == "roughness")               m.roughness = std::stof(val);
+                else if (key == "ao")                      m.ao = std::stof(val);
+                else if (key == "emissiveColor")           m.emissiveColor = pv3(val);
+                else if (key == "emissiveFactor")          m.emissiveFactor = pv3(val);
+                else if (key == "emissiveIntensity")       m.emissiveIntensity = std::stof(val);
+                else if (key == "emissiveStrength")        m.emissiveStrength = std::stof(val);
+                else if (key == "normalStrength")          m.normalStrength = std::stof(val);
+                else if (key == "heightScale")             m.heightScale = std::stof(val);
+                else if (key == "sssEnabled")              m.sssEnabled = (val == "1");
+                else if (key == "sssIntensity")            m.sssIntensity = std::stof(val);
+                else if (key == "sssMask")                 m.sssMask = std::stof(val);
+                else if (key == "useAlbedoMap")            m.useAlbedoMap = std::stoi(val);
+                else if (key == "useNormalMap")            m.useNormalMap = std::stoi(val);
+                else if (key == "useMetallicRoughnessMap") m.useMetallicRoughnessMap = std::stoi(val);
+                else if (key == "useAOMap")                m.useAOMap = std::stoi(val);
+                else if (key == "useHeightMap")            m.useHeightMap = std::stoi(val);
+                else if (key == "useEmissiveMap")          m.useEmissiveMap = std::stoi(val);
+                else if (key == "albedoMapPath")           m.albedoMapPath = val;
+                else if (key == "normalMapPath")           m.normalMapPath = val;
+                else if (key == "metallicRoughnessMapPath") m.metallicRoughnessMapPath = val;
+                else if (key == "aoMapPath")               m.aoMapPath = val;
+                else if (key == "heightMapPath")           m.heightMapPath = val;
+                else if (key == "emissiveMapPath")         m.emissiveMapPath = val;
+            } catch (...) {}
+        };
+
+        while (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty() || line[0] == '#') continue;
+
+            // ---- Section markers ----
+            if (line == "POST_PROCESS_BEGIN") { section = SECTION_PP; continue; }
+            if (line == "POST_PROCESS_END")   { section = SECTION_NONE; continue; }
+            if (line == "EDITOR_STATE_BEGIN") { section = SECTION_EDITOR; continue; }
+            if (line == "EDITOR_STATE_END")   { section = SECTION_NONE; continue; }
+
+            if (line == "ENTITY_BEGIN") {
+                current = EditorEntity{};
+                current.model = nullptr;
+                currentMat = Material{};
+                currentSlots.clear();
+                currentParams.clear();
+                currentScriptPath.clear();
+                inEntity = true;
+                continue;
+            }
+
+            if (line == "ENTITY_END") {
+                // Finalize entity
+                current.material = currentMat;
+                current.materialSlots = currentSlots;
+                current.scriptParams = currentParams;
+
+                // Load model
+                int modelIndex = -1;
+                for (size_t i = 0; i < modelPaths.size(); ++i) {
+                    if (modelPaths[i] == current.modelPath) { modelIndex = (int)i; break; }
+                }
+                if (modelIndex == -1 && !current.modelPath.empty() && fs::exists(current.modelPath)) {
+                    try {
+                        Model* newModel = new Model(current.modelPath.c_str());
+                        if (newModel && !newModel->meshes.empty()) {
+                            loadedModels.push_back(newModel);
+                            modelPaths.push_back(current.modelPath);
+                            modelIndex = (int)loadedModels.size() - 1;
+                        } else {
+                            delete newModel;
+                        }
+                    } catch (...) {}
+                }
+                if (modelIndex != -1) current.model = loadedModels[modelIndex];
+
+                if (current.model) {
+                    current.boundingRadius = current.model->GetBoundingRadius()
+                        * glm::max(current.scale.x, 
+                                   glm::max(current.scale.y, current.scale.z));
+                }
+
+                // Reload textures
+                current.material.customAlbedoID   = reloadTextureSafe(current.material.albedoMapPath);
+                current.material.customNormalID   = reloadTextureSafe(current.material.normalMapPath);
+                current.material.customMRID       = reloadTextureSafe(current.material.metallicRoughnessMapPath);
+                current.material.customAOID       = reloadTextureSafe(current.material.aoMapPath);
+                current.material.customHeightID   = reloadTextureSafe(current.material.heightMapPath);
+                current.material.customEmissiveID = reloadTextureSafe(current.material.emissiveMapPath);
+
+                for (auto& slot : current.materialSlots) {
+                    slot.material.customAlbedoID   = reloadTextureSafe(slot.material.albedoMapPath);
+                    slot.material.customNormalID   = reloadTextureSafe(slot.material.normalMapPath);
+                    slot.material.customMRID       = reloadTextureSafe(slot.material.metallicRoughnessMapPath);
+                    slot.material.customAOID       = reloadTextureSafe(slot.material.aoMapPath);
+                    slot.material.customHeightID   = reloadTextureSafe(slot.material.heightMapPath);
+                    slot.material.customEmissiveID = reloadTextureSafe(slot.material.emissiveMapPath);
+                }
+
+                entities.push_back(current);
+                int newIdx = (int)entities.size() - 1;
+
+                // Script
+                if (!currentScriptPath.empty() && fs::exists(currentScriptPath)) {
+                    entities[newIdx].script = std::make_shared<ScriptComponent>(
+                        lua, currentScriptPath, newIdx);
+                    if (entities[newIdx].script->isLoaded()) entities[newIdx].script->start();
+                }
+
+                // Physics
+                if (current.simulatePhysics) GeneratePhysicsBody(entities.back());
+
+                inEntity = false;
+                continue;
+            }
+
+            // ---- Parse key=value ----
+            size_t eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = line.substr(0, eq);
+            std::string val = line.substr(eq + 1);
+
+            // ============================================
+            //  POST-PROCESSING
+            // ============================================
+            if (section == SECTION_PP) {
+                try {
+
+                    if (key == "enableBloom")       enableBloom = (val == "1");
+                    else if (key == "bloomThreshold")    bloomThreshold = std::stof(val);
+                    else if (key == "bloomIntensity")    bloomIntensity = std::stof(val);
+                    else if (key == "bloomCompositeStrength") bloomCompositeStrength = std::stof(val);
+
+                    else if (key == "saturation")        saturation = std::stof(val);
+                    else if (key == "contrast")          contrast = std::stof(val);
+                    else if (key == "gamma")             gamma = std::stof(val);
+                    else if (key == "exposure")          exposure = std::stof(val);
+
+                    else if (key == "enableSharpening")  enableSharpening = (val == "1");
+                    else if (key == "sharpeningStrength") sharpeningStrength = std::stof(val);
+
+                    else if (key == "enableVignette")    enableVignette = (val == "1");
+                    else if (key == "vignetteStrength")  vignetteStrength = std::stof(val);
+                    else if (key == "vignetteRadius")    vignetteRadius = std::stof(val);
+
+                    else if (key == "enableChromaticAberration") enableChromaticAberration = (val == "1");
+                    else if (key == "chromaticStrength") chromaticStrength = std::stof(val);
+
+                    else if (key == "enableFilmGrain")   enableFilmGrain = (val == "1");
+                    else if (key == "grainStrength")     grainStrength = std::stof(val);
+
+                    else if (key == "enableAutoExposure") enableAutoExposure = (val == "1");
+                    else if (key == "minExposure")       minExposure = std::stof(val);
+                    else if (key == "maxExposure")       maxExposure = std::stof(val);
+                    else if (key == "keyValue")          keyValue = std::stof(val);
+                    else if (key == "adaptationSpeed")   adaptationSpeed = std::stof(val);
+
+                    else if (key == "enableSSR")         enableSSR = (val == "1");
+                    else if (key == "ssrIntensity")      ssrIntensity = std::stof(val);
+                    else if (key == "ssrMaxDistance")    ssrMaxDistance = std::stof(val);
+                    else if (key == "ssrThickness")      ssrThickness = std::stof(val);
+                    else if (key == "ssrMaxSteps")       ssrMaxSteps = std::stoi(val);
+                    else if (key == "ssrResolution")     ssrResolution = std::stof(val);
+
+                    else if (key == "enableVolumetricFog") enableVolumetricFog = (val == "1");
+                    else if (key == "fogDensity")        fogDensity = std::stof(val);
+                    else if (key == "fogHeight")         fogHeight = std::stof(val);
+                    else if (key == "fogFalloff")        fogFalloff = std::stof(val);
+                    else if (key == "fogSteps")          fogSteps = std::stoi(val);
+                    else if (key == "fogMaxDistance")    fogMaxDistance = std::stof(val);
+                    else if (key == "fogColor")          fogColor = parseVec3Str(val);
+
+                    else if (key == "enableContactShadows") enableContactShadows = (val == "1");
+                    else if (key == "enableFXAA")        enableFXAA = (val == "1");
+
+                    else if (key == "enableSSS")         enableSSS = (val == "1");
+                    else if (key == "sssIntensityGlobal") sssIntensity = std::stof(val);
+                    else if (key == "sssColor")          sssColor = parseVec3Str(val);
+                    else if (key == "sssWidth")          sssWidth = std::stof(val);
+
+                    else if (key == "lutEnabled")        lutEnabled = (val == "1");
+                    else if (key == "lutStrength")       lutStrength = std::stof(val);
+
+                    else if (key == "showSkybox")        showSkybox = (val == "1");
+                    else if (key == "enableEnvReflections") enableEnvReflections = (val == "1");
+                    else if (key == "envReflectionIntensity") envReflectionIntensity = std::stof(val);
+                    else if (key == "ambientIntensity")  ambientIntensity = std::stof(val);
+
+                    else if (key == "skyTopColor")       customTopColor = parseVec3Str(val);
+                    else if (key == "skyHorizonColor")   customHorizonColor = parseVec3Str(val);
+                    else if (key == "skyBottomColor")    customBottomColor = parseVec3Str(val);
+                    else if (key == "sunColor")          customSunColor = parseVec3Str(val);
+                    else if (key == "sunDirection")      customSunDirection = parseVec3Str(val);
+                    else if (key == "sunIntensity")      customSunIntensity = std::stof(val);
+                    else if (key == "cloudDensity")      customCloudDensity = std::stof(val);
+                    else if (key == "cloudOpacity")      customCloudOpacity = std::stof(val);
+                } catch (...) {}
+                continue;
+            }
+
+            // ============================================
+            //  EDITOR STATE
+            // ============================================
+            if (section == SECTION_EDITOR) {
+                try {
+                    if      (key == "editorFOV")         editorFOV = std::stof(val);
+                    else if (key == "gameFOV")           gameFOV = std::stof(val);
+                    else if (key == "cameraPosition")    camera.Position = parseVec3Str(val);
+                    else if (key == "cameraOrientation") camera.Orientation = glm::normalize(parseVec3Str(val));
+                    else if (key == "currentSkyboxFolder") currentSkyboxFolder = val;
+                    else if (key == "selectedSkyboxIndex") selectedSkyboxIndex = std::stoi(val);
+                } catch (...) {}
+                continue;
+            }
+
+            // ============================================
+            //  ENTITY FIELDS
+            // ============================================
+            if (!inEntity) continue;
+
+            try {
+                if (key == "modelPath")        current.modelPath = val;
+                else if (key == "type")        current.type = (EntityType)std::stoi(val);
+                else if (key == "position")    current.position = parseVec3Str(val);
+                else if (key == "rotation")    current.rotation = parseVec3Str(val);
+                else if (key == "scale")       current.scale = parseVec3Str(val);
+                else if (key == "velocity")    current.velocity = parseVec3Str(val);
+                else if (key == "isCameraPossessed") current.isCameraPossessed = (val == "1");
+                else if (key == "simulatePhysics")   current.simulatePhysics = (val == "1");
+                else if (key == "selectedMaterialSlot") current.selectedMaterialSlot = std::stoi(val);
+
+                else if (key == "scriptPath") currentScriptPath = val;
+
+                else if (key == "scriptParam") {
+                    size_t comma = val.find(',');
+                    if (comma != std::string::npos) {
+                        ScriptParam p;
+                        p.name = val.substr(0, comma);
+                        p.value = std::stof(val.substr(comma + 1));
+                        currentParams.push_back(p);
+                    }
+                }
+
+                else if (key == "lightEnabled")    current.light.enabled = (val == "1");
+                else if (key == "lightColor")      current.light.color = parseVec3Str(val);
+                else if (key == "lightIntensity")  current.light.intensity = std::stof(val);
+                else if (key == "lightRange")      current.light.range = std::stof(val);
+                else if (key == "lightInnerCone")  current.light.innerConeAngle = std::stof(val);
+                else if (key == "lightOuterCone")  current.light.outerConeAngle = std::stof(val);
+                else if (key == "lightAttenuation") current.light.attenuation = std::stof(val);
+
+                // ---- Material (main) ----
+                else if (key.rfind("material.", 0) == 0) {
+                    parseMaterialKey(key.substr(9), val, currentMat, parseVec3Str, parseVec4Str);
+                }
+
+                // ---- Material slots ----
+                else if (key.rfind("slot", 0) == 0 && key.size() > 4 && isdigit(key[4])) {
+                    size_t dot = key.find('.');
+                    if (dot == std::string::npos) continue;
+                    int idx = std::stoi(key.substr(4, dot - 4));
+                    std::string subkey = key.substr(dot + 1);
+
+                    while ((int)currentSlots.size() <= idx) {
+                        MaterialSlot s;
+                        s.meshIndex = 0;
+                        s.name = "Material " + std::to_string(currentSlots.size());
+                        currentSlots.push_back(s);
+                    }
+
+                    if (subkey == "meshIndex") currentSlots[idx].meshIndex = std::stoi(val);
+                    else if (subkey == "name") currentSlots[idx].name = val;
+                    else parseMaterialKey(subkey, val, currentSlots[idx].material, parseVec3Str, parseVec4Str);
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "[Load] Parse error: " << key << "=" << val
+                        << " — " << e.what() << std::endl;
+            }
+        }
+
+        file.close();
+        std::cout << "[Level] Loaded: " << levelPath
+                << " (" << entities.size() << " entities + post-processing)" << std::endl;
+    };
+        
     // ============================================================
     // 23. Lighting defaults
     // ============================================================
@@ -2198,13 +2925,28 @@ int main()
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 
     SpawnRandomLights(entities, 1, 10.0f);
-
-
+    
     // ============================================================
     // 24. MAIN LOOP (with updated UI)
     // ============================================================
     while (!glfwWindowShouldClose(window)) {
-        float deltaTime = 0.016f;
+
+        // ---- Process async callbacks ----
+        AsyncLoader::Get().Poll();
+
+        // ---- Build any ready models ----
+        {
+            std::lock_guard<std::mutex> lock(modelsReadyMutex);
+            while (!modelsReadyToBuild->empty()) {
+                std::string path = modelsReadyToBuild->back();
+                modelsReadyToBuild->pop_back();
+
+                std::cout << "[Async] Building model: " << path << std::endl;
+                Model* model = new Model(path.c_str());
+                loadedModels.push_back(model);
+                modelPaths.push_back(path);
+            }
+        }
 
         // ---- Player Update ----
         if (gameMode && playerBodyID != BodyID()) {
@@ -2351,6 +3093,37 @@ int main()
             }
         }
 
+        // ============================================================
+        //           PER-ENTITY SKELETAL ANIMATION UPDATE
+        // ============================================================
+        for (auto& entity : entities) {
+            if (!entity.model) continue;
+            if (entity.model->animations.empty()) continue;
+        
+            int clipIdx = entity.animPlayer.currentClip;
+            if (clipIdx < 0 || clipIdx >= (int)entity.model->animations.size())
+                clipIdx = 0;
+        
+            const Animation& clip = entity.model->animations[clipIdx];
+        
+            if (entity.animPlayer.playing) {
+                entity.animPlayer.currentTime += deltaTime * entity.animPlayer.playbackSpeed;
+        
+                if (entity.animPlayer.loop) {
+                    if (clip.duration > 0.0f)
+                        entity.animPlayer.currentTime = fmod(entity.animPlayer.currentTime, clip.duration);
+                } else {
+                    entity.animPlayer.currentTime = std::min(entity.animPlayer.currentTime, clip.duration);
+                    if (entity.animPlayer.currentTime >= clip.duration)
+                        entity.animPlayer.playing = false;
+                }
+            }
+        
+            float t = entity.animPlayer.currentTime;
+        
+            entity.model->updateAnimation(entity.animPlayer.currentTime);
+        }
+        
         // ---- Camera Possession ----
         int possessedEntityId = -1;
         for (int i = 0; i < (int)entities.size(); ++i) {
@@ -2493,265 +3266,315 @@ int main()
             ImGui::EndMainMenuBar();
         }
 
-        // ---- Level Editor Window ----
+        
         if (showLevelEditor) {
+            ImGui::SetNextWindowSize(ImVec2(500, 950), ImGuiCond_FirstUseEver);
             ImGui::Begin("Level Editor", &showLevelEditor);
-
-            ImGui::Text("Level Name:");
-            ImGui::SameLine();
-            ImGui::InputText("##LevelName", levelNameBuffer, sizeof(levelNameBuffer));
-            levelName = levelNameBuffer;
-            levelPath = levelFolder + "/" + levelName + ".txt";
-            ImGui::Text("Path: %s", levelPath.c_str());
-            ImGui::Separator();
-
-            if (ImGui::Button("Save")) {
-                if (fs::exists(levelPath)) showOverwriteWarning = true;
-                else saveLevel();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Load")) {
-                if (fs::exists(levelPath)) loadLevel();
-                else std::cout << "Level not found: " << levelPath << std::endl;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("New")) {
-                pushUndo();
-                entities.clear();
-                selectedEntity = -1;
-            }
-
-            ImGui::Separator();
-            if (ImGui::Button("Undo")) applyUndo();
-            ImGui::SameLine();
-            if (ImGui::Button("Redo")) applyRedo();
-
-            ImGui::Separator();
-            if (ImGui::Button(gameMode ? "Stop" : "Play")) {
-                if (!gameMode) {
-                    savedEntities = copyEntities(entities);
-                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-                    glfwGetCursorPos(window, &lastMouseX, &lastMouseY);
-                    firstMouse = true;
-                    yaw = glm::degrees(atan2(camera.Orientation.z, camera.Orientation.x));
-                    pitch = glm::degrees(asin(camera.Orientation.y));
-                }
-                else {
-                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-                    entities = copyEntities(savedEntities);
-                }
-                gameMode = !gameMode;
-                if (!gameMode) entities = copyEntities(savedEntities);
-            }
-
-            ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "Engine Ready");
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "|");
-            ImGui::SameLine();
-            ImGui::Text("FPS: %.1f  |  Entities: %zu  |  Resolution: %dx%d",
-                fps, entities.size(), width, height);
-
-            ImGui::Separator();
-            ImGui::Text("Camera FOV");
-            if (gameMode) {
-                if (ImGui::SliderFloat("Game FOV", &gameFOV, 10.0f, 120.0f)) {
-                    camera.updateMatrix(gameFOV, 0.1f, 1000.0f);
-                }
-            }
-            else {
-                if (ImGui::SliderFloat("Editor FOV", &editorFOV, 10.0f, 120.0f)) {
-                    camera.updateMatrix(editorFOV, 0.1f, 1000.0f);
-                }
-                else (ImGui::SliderFloat("Game FOV", &gameFOV, 10.0f, 120.0f));
-            }
-
-            ImGui::Separator();
-            ImGui::Text("Debug View");
-            if (ImGui::Combo("##DebugView", &debugView, debugViewNames, 8)) {
-                std::cout << "[Debug] View changed to: " << debugViewNames[debugView] << std::endl;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Reset##Debug")) {
-                debugView = 0;
-            }
-
-            ImGui::Separator();
-            ImGui::Text("Lights");
-
-            if (ImGui::Button("Ambient")) {
-                EditorEntity lightEntity;
-                lightEntity.model = nullptr;
-                lightEntity.modelPath = "";
-                lightEntity.position = glm::vec3(0.0f, 10.0f, 0.0f);
-                lightEntity.rotation = glm::vec3(0.0f, 0.0f, 0.0f);
-                lightEntity.scale = glm::vec3(1.0f);
-                lightEntity.type = EntityType::AmbientLight;
-                lightEntity.velocity = glm::vec3(0.0f);
-                lightEntity.script = nullptr;
-                lightEntity.isCameraPossessed = false;
-                lightEntity.simulatePhysics = false;
-
-                // Light defaults
-                lightEntity.light.enabled = true;
-                lightEntity.light.color = glm::vec3(1.0f, 0.95f, 0.85f); // Slight warm
-                lightEntity.light.intensity = 1.0f;
-                lightEntity.light.range = 0.0f;              // Not used for directional
-                lightEntity.light.innerConeAngle = 0.0f;     // Not used
-                lightEntity.light.outerConeAngle = 0.0f;     // Not used
-                lightEntity.light.attenuation = 1.0f;
-
-                pushUndo();
-                entities.push_back(lightEntity);
-                std::cout << "[Editor] Created Ambient Light entity." << std::endl;
-            }
-            ImGui::SameLine();
-
-            if (ImGui::Button("Directional")) {
-                EditorEntity lightEntity;
-                lightEntity.model = nullptr;
-                lightEntity.modelPath = "";
-                lightEntity.position = glm::vec3(0.0f, 10.0f, 0.0f);
-                lightEntity.rotation = glm::vec3(0.0f, 0.0f, 0.0f); 
-                lightEntity.scale = glm::vec3(1.0f);
-                lightEntity.type = EntityType::DirectionalLight;
-                lightEntity.velocity = glm::vec3(0.0f);
-                lightEntity.script = nullptr;
-                lightEntity.isCameraPossessed = false;
-                lightEntity.simulatePhysics = false;
-
-                // Light defaults
-                lightEntity.light.enabled = true;
-                lightEntity.light.color = glm::vec3(1.0f, 0.95f, 0.85f); // Slight warm
-                lightEntity.light.intensity = 1.0f;
-                lightEntity.light.range = 0.0f;              // Not used for directional
-                lightEntity.light.innerConeAngle = 0.0f;     // Not used
-                lightEntity.light.outerConeAngle = 0.0f;     // Not used
-                lightEntity.light.attenuation = 1.0f;
-
-                pushUndo();
-                entities.push_back(lightEntity);
-                std::cout << "[Editor] Created Directional Light entity." << std::endl;
-            }
-            ImGui::SameLine();
-
-            if (ImGui::Button("Point")) {
-                EditorEntity lightEntity;
-                lightEntity.model = nullptr;
-                lightEntity.modelPath = "";
-                lightEntity.position = glm::vec3(0.0f, 3.0f, 0.0f);
-                lightEntity.rotation = glm::vec3(0.0f);
-                lightEntity.scale = glm::vec3(1.0f);
-                lightEntity.type = EntityType::PointLight;
-                lightEntity.velocity = glm::vec3(0.0f);
-                lightEntity.script = nullptr;
-                lightEntity.isCameraPossessed = false;
-                lightEntity.simulatePhysics = false;
-
-                lightEntity.light.enabled = true;
-                lightEntity.light.color = glm::vec3(0.0f, 0.9f, 0.7f);
-                lightEntity.light.intensity = 5.0f;
-                lightEntity.light.range = 15.0f;
-                lightEntity.light.innerConeAngle = 0.0f;
-                lightEntity.light.outerConeAngle = 0.0f;
-                lightEntity.light.attenuation = 1.0f;
-
-                pushUndo();
-                entities.push_back(lightEntity);
-                std::cout << "[Editor] Created Point Light entity." << std::endl;
-            }
-            ImGui::SameLine();
-
-            if (ImGui::Button("Spot")) {
-                EditorEntity lightEntity;
-                lightEntity.model = nullptr;
-                lightEntity.modelPath = "";
-                lightEntity.position = glm::vec3(0.0f, 5.0f, 0.0f);
-                lightEntity.rotation = glm::vec3(0.0f, 0.0f, 0.0f); 
-                lightEntity.scale = glm::vec3(1.0f);
-                lightEntity.type = EntityType::SpotLight;
-                lightEntity.velocity = glm::vec3(0.0f);
-                lightEntity.script = nullptr;
-                lightEntity.isCameraPossessed = false;
-                lightEntity.simulatePhysics = false;
-
-                lightEntity.light.enabled = true;
-                lightEntity.light.color = glm::vec3(1.0f, 1.0f, 1.0f);
-                lightEntity.light.intensity = 8.0f;
-                lightEntity.light.range = 25.0f;
-                lightEntity.light.innerConeAngle = 15.0f;
-                lightEntity.light.outerConeAngle = 30.0f;
-                lightEntity.light.attenuation = 1.0f;
-
-                pushUndo();
-                entities.push_back(lightEntity);
-                std::cout << "[Editor] Created Spot Light entity." << std::endl;
-            }
-            ImGui::Separator();
-
-            ImGui::Text("Gizmo Controls");
-
-            // اختيار الوضع
-            const char* modes[] = { "Translate (T)", "Rotate (R)", "Scale (S)" };
-            int modeIndex = (int)currentGizmo - 1;
-            if (modeIndex < 0) modeIndex = 0;
-            if (ImGui::Combo("Mode", &modeIndex, modes, 3)) {
-                currentGizmo = (GizmoType)(modeIndex + 1);
-            }
-
-            // اختيار النظام (محلي / عالمي)
-            static bool useLocal = true;
-            ImGui::Checkbox("Local Space", &useLocal);
-            ImGuizmo::Enable(useLocal);
-
-
-            // اختصارات لوحة المفاتيح
-            if (ImGui::IsKeyPressed('T')) currentGizmo = GizmoType::Translate;
-            if (ImGui::IsKeyPressed('R')) currentGizmo = GizmoType::Rotate;
-            if (ImGui::IsKeyPressed('S')) currentGizmo = GizmoType::Scale;
-            ImGui::Text("Hotkeys: T=Translate, R=Rotate, S=Scale");
-
-            ImGui::Separator();
-            if (ImGui::Button("Reset Player & Camera")) {
-                if (playerBodyID != BodyID()) {
-                    body_interface.SetPosition(playerBodyID, RVec3(0.0_r, 2.0_r, 0.0_r), EActivation::Activate);
-                    body_interface.SetLinearVelocity(playerBodyID, Vec3(0.0f, 0.0f, 0.0f));
-                    body_interface.SetAngularVelocity(playerBodyID, Vec3(0.0f, 0.0f, 0.0f));
-                }
-                camera.Position = glm::vec3(0.0f, 3.7f, 0.0f);
-                camera.Orientation = glm::normalize(glm::vec3(0.0f, 0.0f, -1.0f));
-                yaw = -90.0f;
-                pitch = 0.0f;
-                for (auto& entity : entities) {
-                    if (entity.type == EntityType::Player) {
-                        entity.position = glm::vec3(0.0f, 2.0f, 0.0f);
-                        entity.rotation.y = 0.0f;
-                        break;
+        
+            // ============================================================
+            //                    TOP TAB BAR
+            // ============================================================
+            if (ImGui::BeginTabBar("TopTabs", ImGuiTabBarFlags_None)) {
+        
+                // ====================================================
+                //  TAB 1 — LAYOUT
+                // ====================================================
+                if (ImGui::BeginTabItem("Layout")) {
+                    ImGui::Spacing();
+        
+                    // --- Level file ---
+                    ImGui::TextDisabled("LEVEL FILE");
+                    ImGui::SetNextItemWidth(-120);
+                    ImGui::InputText("##LevelName", levelNameBuffer, sizeof(levelNameBuffer));
+                    levelName = levelNameBuffer;
+                    levelPath = levelFolder + "/" + levelName + ".txt";
+        
+                    ImGui::SameLine();
+                    if (ImGui::Button("Save", ImVec2(50, 0))) {
+                        if (fs::exists(levelPath)) showOverwriteWarning = true;
+                        else saveLevel();
                     }
-                }
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("(or press R in Play Mode)");
-
-            ImGui::Separator();
-            if (ImGui::Button("Generate Physics for All Entities")) {
-                for (auto& entity : entities) {
-                    if (entity.model != nullptr && !entity.simulatePhysics) {
-                        GeneratePhysicsBody(entity);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Load", ImVec2(50, 0))) {
+                        if (fs::exists(levelPath)) loadLevel();
+                        else std::cout << "Level not found: " << levelPath << std::endl;
                     }
+        
+                    ImGui::TextDisabled("%s", levelPath.c_str());
+        
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+        
+                    // --- Edit ---
+                    ImGui::TextDisabled("EDIT");
+                    if (ImGui::Button("Undo", ImVec2(70, 0))) applyUndo();
+                    ImGui::SameLine();
+                    if (ImGui::Button("Redo", ImVec2(70, 0))) applyRedo();
+                    ImGui::SameLine();
+                    if (ImGui::Button("New", ImVec2(70, 0))) {
+                        pushUndo();
+                        entities.clear();
+                        selectedEntity = -1;
+                    }
+        
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+        
+                    // --- Play/Stop ---
+                    ImGui::TextDisabled("PLAYBACK");
+        
+                    ImVec4 playCol = gameMode
+                        ? ImVec4(0.8f, 0.3f, 0.3f, 1.0f)
+                        : ImVec4(0.3f, 0.7f, 0.3f, 1.0f);
+                    ImVec4 playColHover = ImVec4(
+                        playCol.x * 1.2f,
+                        playCol.y * 1.2f,
+                        playCol.z * 1.2f,
+                        playCol.w);
+        
+                    ImGui::PushStyleColor(ImGuiCol_Button, playCol);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, playColHover);
+                    if (ImGui::Button(gameMode ? "  STOP  " : "  PLAY  ", ImVec2(-1, 32))) {
+                        if (!gameMode) {
+                            savedEntities = copyEntities(entities);
+                            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                            glfwGetCursorPos(window, &lastMouseX, &lastMouseY);
+                            firstMouse = true;
+                            yaw = glm::degrees(atan2(camera.Orientation.z, camera.Orientation.x));
+                            pitch = glm::degrees(asin(camera.Orientation.y));
+                        } else {
+                            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                            entities = copyEntities(savedEntities);
+                        }
+                        gameMode = !gameMode;
+                        if (!gameMode) entities = copyEntities(savedEntities);
+                    }
+                    ImGui::PopStyleColor(2);
+        
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+        
+                    // --- Camera FOV ---
+                    ImGui::TextDisabled("CAMERA");
+                    if (gameMode) {
+                        if (ImGui::SliderFloat("Game FOV##Layout", &gameFOV, 10.0f, 120.0f, "%.0f deg"))
+                            camera.updateMatrix(gameFOV, 0.1f, 1000.0f);
+                    } else {
+                        if (ImGui::SliderFloat("Editor FOV##Layout", &editorFOV, 10.0f, 120.0f, "%.0f deg"))
+                            camera.updateMatrix(editorFOV, 0.1f, 1000.0f);
+                        ImGui::SliderFloat("Game FOV##Layout2", &gameFOV, 10.0f, 120.0f, "%.0f deg");
+                    }
+        
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+        
+                    // --- Gizmo ---
+                    ImGui::TextDisabled("GIZMO");
+                    const char* gizmoModes[] = { "Translate", "Rotate", "Scale" };
+                    int modeIndex = (int)currentGizmo - 1;
+                    if (modeIndex < 0) modeIndex = 0;
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::Combo("##GizmoMode", &modeIndex, gizmoModes, 3))
+                        currentGizmo = (GizmoType)(modeIndex + 1);
+        
+                    static bool useLocal = true;
+                    ImGui::Checkbox("Local Space", &useLocal);
+                    ImGuizmo::Enable(useLocal);
+        
+                    if (ImGui::IsKeyPressed('T')) currentGizmo = GizmoType::Translate;
+                    if (ImGui::IsKeyPressed('R')) currentGizmo = GizmoType::Rotate;
+                    if (ImGui::IsKeyPressed('S')) currentGizmo = GizmoType::Scale;
+                    ImGui::TextDisabled("Hotkeys: T / R / S");
+        
+                    ImGui::EndTabItem();
                 }
-                pushUndo();
+        
+                // ====================================================
+                //  TAB 2 — SCENE
+                // ====================================================
+                if (ImGui::BeginTabItem("Scene")) {
+                    ImGui::Spacing();
+        
+                    // --- Add Entity ---
+                    ImGui::TextDisabled("ADD ENTITY");
+                    if (ImGui::Button("Empty", ImVec2(-1, 0))) {
+                        EditorEntity e;
+                        e.type = EntityType::Empty;
+                        pushUndo();
+                        entities.push_back(e);
+                    }
+        
+                    ImGui::Spacing();
+        
+                    float fullW = ImGui::GetContentRegionAvail().x;
+                    float btnW = (fullW - 6.0f) / 4.0f;
+        
+                    if (ImGui::Button("Ambient", ImVec2(btnW, 0))) {
+                        EditorEntity e;
+                        e.type = EntityType::AmbientLight;
+                        e.light.enabled = true;
+                        e.light.color = glm::vec3(1.0f, 0.95f, 0.85f);
+                        e.light.intensity = 1.0f;
+                        pushUndo();
+                        entities.push_back(e);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Dir", ImVec2(btnW, 0))) {
+                        EditorEntity e;
+                        e.type = EntityType::DirectionalLight;
+                        e.position = glm::vec3(0.0f, 10.0f, 0.0f);
+                        e.light.enabled = true;
+                        e.light.color = glm::vec3(1.0f, 0.95f, 0.85f);
+                        e.light.intensity = 1.0f;
+                        pushUndo();
+                        entities.push_back(e);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Point", ImVec2(btnW, 0))) {
+                        EditorEntity e;
+                        e.type = EntityType::PointLight;
+                        e.position = glm::vec3(0.0f, 3.0f, 0.0f);
+                        e.light.enabled = true;
+                        e.light.color = glm::vec3(0.0f, 0.9f, 0.7f);
+                        e.light.intensity = 5.0f;
+                        e.light.range = 15.0f;
+                        pushUndo();
+                        entities.push_back(e);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Spot", ImVec2(btnW, 0))) {
+                        EditorEntity e;
+                        e.type = EntityType::SpotLight;
+                        e.position = glm::vec3(0.0f, 5.0f, 0.0f);
+                        e.light.enabled = true;
+                        e.light.color = glm::vec3(1.0f);
+                        e.light.intensity = 8.0f;
+                        e.light.range = 25.0f;
+                        e.light.innerConeAngle = 15.0f;
+                        e.light.outerConeAngle = 30.0f;
+                        pushUndo();
+                        entities.push_back(e);
+                    }
+        
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    ImGui::Checkbox("Show Material Debug Box", &showMaterialDebugBox);
+                    if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Highlights the mesh of the selected material slot");
+}
+        
+                    // --- Scene actions ---
+                    ImGui::TextDisabled("SCENE ACTIONS");
+                    if (ImGui::Button("Reset Player & Camera", ImVec2(-1, 0))) {
+                        if (playerBodyID != BodyID()) {
+                            body_interface.SetPosition(playerBodyID,
+                                RVec3(0.0_r, 2.0_r, 0.0_r), EActivation::Activate);
+                            body_interface.SetLinearVelocity(playerBodyID, Vec3(0.0f, 0.0f, 0.0f));
+                            body_interface.SetAngularVelocity(playerBodyID, Vec3(0.0f, 0.0f, 0.0f));
+                        }
+                        camera.Position = glm::vec3(0.0f, 3.7f, 0.0f);
+                        camera.Orientation = glm::normalize(glm::vec3(0.0f, 0.0f, -1.0f));
+                        yaw = -90.0f;
+                        pitch = 0.0f;
+                        for (auto& entity : entities) {
+                            if (entity.type == EntityType::Player) {
+                                entity.position = glm::vec3(0.0f, 2.0f, 0.0f);
+                                entity.rotation.y = 0.0f;
+                                break;
+                            }
+                        }
+                    }
+                    ImGui::TextDisabled("(or press R in Play Mode)");
+        
+                    if (ImGui::Button("Generate Physics for All", ImVec2(-1, 0))) {
+                        for (auto& entity : entities) {
+                            if (entity.model != nullptr && !entity.simulatePhysics) {
+                                GeneratePhysicsBody(entity);
+                            }
+                        }
+                        pushUndo();
+                    }
+        
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+        
+                    // --- Viewport ---
+                    ImGui::TextDisabled("VIEWPORT");
+                    ImGui::Checkbox("Frustum Culling", &enableFrustumCulling);
+                    ImGui::Checkbox("Show Light Gizmos", &showLightGizmos);
+        
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::Combo("Debug View##Scene", &debugView, debugViewNames, 9))
+                        std::cout << "[Debug] View: " << debugViewNames[debugView] << std::endl;
+        
+                    ImGui::EndTabItem();
+                }
+        
+                // ====================================================
+                //  TAB 3 — STATS
+                // ====================================================
+                if (ImGui::BeginTabItem("Stats")) {
+                    ImGui::Spacing();
+        
+                    ImGui::TextDisabled("PERFORMANCE");
+                    ImVec4 fpsColor = fps >= 60.0f ? ImVec4(0.4f, 1.0f, 0.4f, 1.0f)
+                        : fps >= 30.0f ? ImVec4(1.0f, 0.9f, 0.3f, 1.0f)
+                        : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                    ImGui::TextColored(fpsColor, "%.1f FPS", fps);
+        
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+        
+                    int lightCount = 0, meshCount = 0;
+                    for (const auto& e : entities) {
+                        if (e.type == EntityType::PointLight ||
+                            e.type == EntityType::SpotLight ||
+                            e.type == EntityType::DirectionalLight ||
+                            e.type == EntityType::AmbientLight) lightCount++;
+                        else if (!e.modelPath.empty()) meshCount++;
+                    }
+        
+                    ImGui::TextDisabled("SCENE");
+                    ImGui::Text("Entities:   %zu", entities.size());
+                    ImGui::Text("Meshes:     %d", meshCount);
+                    ImGui::Text("Lights:     %d", lightCount);
+                    ImGui::Text("Selected:   %d", selectedEntity);
+        
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+        
+                    ImGui::TextDisabled("DISPLAY");
+                    ImGui::Text("Resolution: %d x %d", width, height);
+                    ImGui::Text("Aspect:     %.3f", (float)width / (float)height);
+        
+                    ImGui::EndTabItem();
+                }
+        
+                ImGui::EndTabBar();
             }
-            ImGui::SameLine();
-            ImGui::TextDisabled("(creates collisions from models)");
-
+        
+            // ============================================================
+            //                    OUTLINER
+            // ============================================================
+            ImGui::Spacing();
             ImGui::Separator();
-            ImGui::Checkbox("Frustum Culling", &enableFrustumCulling);
-
-            // Entities list
-            if (ImGui::CollapsingHeader("Entities", ImGuiTreeNodeFlags_DefaultOpen)) {
-
-                // Helper: get readable type name
+            ImGui::Spacing();
+        
+            if (ImGui::CollapsingHeader("Outliner", ImGuiTreeNodeFlags_DefaultOpen)) {
+                static char entityFilter[64] = "";
+                ImGui::SetNextItemWidth(-1);
+                ImGui::InputTextWithHint("##EntityFilter", "Search...", entityFilter, sizeof(entityFilter));
+                ImGui::Spacing();
+        
                 auto GetTypeName = [](EntityType t) -> const char* {
                     switch (t) {
                     case EntityType::Static:           return "Static";
@@ -2765,12 +3588,11 @@ int main()
                     case EntityType::AmbientLight:     return "Ambient Light";
                     }
                     return "Unknown";
-                    };
-
-                // Helper: get icon/prefix
+                };
+        
                 auto GetTypeIcon = [](EntityType t) -> const char* {
                     switch (t) {
-                    case EntityType::Static:           return "[M]"; // Mesh
+                    case EntityType::Static:           return "[M]";
                     case EntityType::Player:           return "[P]";
                     case EntityType::Ball:             return "[B]";
                     case EntityType::Camera:           return "[C]";
@@ -2781,613 +3603,1037 @@ int main()
                     case EntityType::AmbientLight:     return "[*]";
                     }
                     return "[?]";
-                    };
-
-                // Helper: get display name for an entity
+                };
+        
                 auto GetEntityLabel = [&](int i) -> std::string {
                     const auto& e = entities[i];
-
-                    // Start with icon + index
                     std::string label = std::string(GetTypeIcon(e.type)) + " " + std::to_string(i) + ": ";
-
-                    // Determine the "name" part
-                    if (e.type == EntityType::PointLight ||
-                        e.type == EntityType::SpotLight ||
-                        e.type == EntityType::DirectionalLight ||
-                        e.type == EntityType::AmbientLight) {
-                        // Lights: show type + color
+                    if (e.type == EntityType::PointLight || e.type == EntityType::SpotLight ||
+                        e.type == EntityType::DirectionalLight || e.type == EntityType::AmbientLight)
                         label += GetTypeName(e.type);
-                    }
-                    else if (e.type == EntityType::Empty) {
-                        label += "Empty";
-                    }
-                    else if (e.type == EntityType::Camera && e.modelPath.empty()) {
-                        label += "Camera";
-                    }
+                    else if (e.type == EntityType::Empty) label += "Empty";
+                    else if (e.type == EntityType::Camera && e.modelPath.empty()) label += "Camera";
                     else if (!e.modelPath.empty()) {
-                        // Show only filename, not full path
-                        std::string filename = fs::path(e.modelPath).filename().string();
-                        label += filename;
-
-                        // Add type suffix if not "Static"
-                        if (e.type != EntityType::Static) {
+                        label += fs::path(e.modelPath).filename().string();
+                        if (e.type != EntityType::Static)
                             label += std::string(" (") + GetTypeName(e.type) + ")";
-                        }
                     }
-                    else {
-                        label += GetTypeName(e.type);
-                    }
-
+                    else label += GetTypeName(e.type);
                     return label;
-                    };
-
-                // Render the list
+                };
+        
+                ImGui::BeginChild("EntityList", ImVec2(0, 220), true);
+        
+                int toDelete = -1;
+                int toDuplicate = -1;
+        
                 for (int i = 0; i < (int)entities.size(); ++i) {
-                    bool isSelected = (selectedEntity == i);
                     std::string label = GetEntityLabel(i);
-
+        
+                    if (entityFilter[0] != '\0') {
+                        std::string l = label, f = entityFilter;
+                        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+                        std::transform(f.begin(), f.end(), f.begin(), ::tolower);
+                        if (l.find(f) == std::string::npos) continue;
+                    }
+        
+                    bool isSelected = (selectedEntity == i);
                     ImGui::PushID(i);
-
-                    // Color-code the label based on type
+        
                     ImVec4 color;
                     switch (entities[i].type) {
-                    case EntityType::Player:           color = ImVec4(0.4f, 0.8f, 0.4f, 1.0f); break;
-                    case EntityType::Camera:           color = ImVec4(0.6f, 0.7f, 1.0f, 1.0f); break;
+                    case EntityType::Player:           color = ImVec4(0.4f, 0.9f, 0.4f, 1.0f); break;
+                    case EntityType::Camera:           color = ImVec4(0.6f, 0.75f, 1.0f, 1.0f); break;
                     case EntityType::PointLight:       color = ImVec4(1.0f, 0.9f, 0.4f, 1.0f); break;
                     case EntityType::SpotLight:        color = ImVec4(1.0f, 0.8f, 0.4f, 1.0f); break;
                     case EntityType::DirectionalLight: color = ImVec4(1.0f, 0.95f, 0.5f, 1.0f); break;
                     case EntityType::AmbientLight:     color = ImVec4(0.9f, 0.7f, 1.0f, 1.0f); break;
                     case EntityType::Ball:             color = ImVec4(1.0f, 0.6f, 0.6f, 1.0f); break;
                     case EntityType::Empty:            color = ImVec4(0.6f, 0.6f, 0.6f, 1.0f); break;
-                    default:                            color = ImVec4(0.85f, 0.85f, 0.9f, 1.0f); break;
+                    default:                            color = ImVec4(0.88f, 0.88f, 0.92f, 1.0f); break;
                     }
-
+        
                     ImGui::PushStyleColor(ImGuiCol_Text, color);
-                    if (ImGui::Selectable(label.c_str(), isSelected)) {
+                    if (ImGui::Selectable(label.c_str(), isSelected))
                         selectedEntity = i;
-                    }
                     ImGui::PopStyleColor();
-
-                    // Tooltip with full info
+        
                     if (ImGui::IsItemHovered()) {
                         ImGui::BeginTooltip();
                         ImGui::Text("Index: %d", i);
                         ImGui::Text("Type: %s", GetTypeName(entities[i].type));
-                        if (!entities[i].modelPath.empty()) {
-                            ImGui::Text("Path: %s", entities[i].modelPath.c_str());
-                        }
+                        if (!entities[i].modelPath.empty())
+                            ImGui::Text("Model: %s",
+                                fs::path(entities[i].modelPath).filename().string().c_str());
                         ImGui::Text("Position: (%.2f, %.2f, %.2f)",
-                            entities[i].position.x,
-                            entities[i].position.y,
-                            entities[i].position.z);
+                            entities[i].position.x, entities[i].position.y, entities[i].position.z);
                         ImGui::EndTooltip();
                     }
-
-                    // Right-click context menu
-                    if (ImGui::BeginPopupContextItem("EntityContextMenu")) {
-                        if (ImGui::MenuItem("Delete")) {
-                            pushUndo();
-                            entities.erase(entities.begin() + i);
-                            if (selectedEntity == i) selectedEntity = -1;
-                            else if (selectedEntity > i) selectedEntity--;
-                            ImGui::EndPopup();
-                            ImGui::PopID();
-                            break; // Exit loop after deletion
-                        }
-                        if (ImGui::MenuItem("Duplicate")) {
-                            pushUndo();
-                            EditorEntity copy = entities[i];
-                            copy.position += glm::vec3(1.0f, 0.0f, 0.0f); // Offset
-                            entities.push_back(copy);
-                            ImGui::EndPopup();
-                            ImGui::PopID();
-                            break;
-                        }
-                        if (ImGui::MenuItem("Focus Camera")) {
-                            // Optional: move camera to look at entity
+        
+                    if (ImGui::BeginPopupContextItem("EntityCtx")) {
+                        if (ImGui::MenuItem("Delete")) toDelete = i;
+                        if (ImGui::MenuItem("Duplicate")) toDuplicate = i;
+                        if (ImGui::MenuItem("Focus Camera"))
                             camera.Position = entities[i].position + glm::vec3(0, 2, 5);
-                        }
                         ImGui::EndPopup();
                     }
-
+        
                     ImGui::PopID();
                 }
-
-                // Show empty message
-                if (entities.empty()) {
-                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "No entities in scene");
+        
+                if (toDuplicate >= 0) {
+                    pushUndo();
+                    EditorEntity copy = entities[toDuplicate];
+                    copy.position += glm::vec3(1.0f, 0.0f, 0.0f);
+                    entities.push_back(copy);
                 }
-
-                // Summary line
-                ImGui::Separator();
+                if (toDelete >= 0) {
+                    pushUndo();
+                    entities.erase(entities.begin() + toDelete);
+                    if (selectedEntity == toDelete) selectedEntity = -1;
+                    else if (selectedEntity > toDelete) selectedEntity--;
+                }
+        
+                if (entities.empty())
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "No entities in scene");
+        
+                ImGui::EndChild();
+        
                 int lightCount = 0, meshCount = 0;
                 for (const auto& e : entities) {
-                    if (e.type == EntityType::PointLight ||
-                        e.type == EntityType::SpotLight ||
-                        e.type == EntityType::DirectionalLight ||
-                        e.type == EntityType::AmbientLight) lightCount++;
+                    if (e.type == EntityType::PointLight || e.type == EntityType::SpotLight ||
+                        e.type == EntityType::DirectionalLight || e.type == EntityType::AmbientLight) lightCount++;
                     else if (!e.modelPath.empty()) meshCount++;
                 }
-                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
                     "Total: %zu  |  Meshes: %d  |  Lights: %d",
                     entities.size(), meshCount, lightCount);
             }
-
-            // Transform controls
-            if (selectedEntity >= 0 && selectedEntity < entities.size()) {
+        
+            // ============================================================
+            //                    PROPERTIES
+            // ============================================================
+            if (selectedEntity >= 0 && selectedEntity < (int)entities.size()) {
                 auto& entity = entities[selectedEntity];
-
-                // بناء مصفوفة التحويل
-                glm::mat4 matrix = glm::mat4(1.0f);
-                matrix = glm::translate(matrix, entity.position);
-                matrix = glm::rotate(matrix, glm::radians(entity.rotation.x), glm::vec3(1.0f, 0.0f, 0.0f));
-                matrix = glm::rotate(matrix, glm::radians(entity.rotation.y), glm::vec3(0.0f, 1.0f, 0.0f));
-                matrix = glm::rotate(matrix, glm::radians(entity.rotation.z), glm::vec3(0.0f, 0.0f, 1.0f));
-                matrix = glm::scale(matrix, entity.scale);
-
-                // اختيار وضع Gizmo
-                ImGuizmo::OPERATION operation = ImGuizmo::TRANSLATE;
-                if (currentGizmo == GizmoType::Translate) operation = ImGuizmo::TRANSLATE;
-                else if (currentGizmo == GizmoType::Rotate) operation = ImGuizmo::ROTATE;
-                else if (currentGizmo == GizmoType::Scale) operation = ImGuizmo::SCALE;
-
-                // ✅ استخدم التوقيع الصحيح (8 معاملات)
-                if (ImGuizmo::Manipulate(
-                    glm::value_ptr(viewMatrix),              // view
-                    glm::value_ptr(proj),                    // projection
-                    operation,                               // OPERATION
-                    useLocal ? ImGuizmo::LOCAL : ImGuizmo::WORLD,  // MODE
-                    glm::value_ptr(matrix)                   // matrix (مدخل/مخرج)
-                    // يمكنك إضافة معاملات إضافية اختيارية:
-                    // NULL,  // deltaMatrix
-                    // NULL,  // snap
-                    // NULL,  // localBounds
-                    // NULL   // boundsSnap
-                )) {
-                    // استخراج المصفوفة الناتجة
-                    glm::vec3 translation, scale;
-                    glm::quat rotation;
-                    glm::vec3 skew;
-                    glm::vec4 perspective;
-
-                    if (glm::decompose(matrix, scale, rotation, translation, skew, perspective)) {
-                        entity.position = translation;
-                        entity.rotation = glm::degrees(glm::eulerAngles(rotation));
-                        entity.scale = scale;
+        
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+        
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.85f, 1.0f, 1.0f));
+                ImGui::Text("Selected: %d", selectedEntity);
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+                ImGui::TextDisabled("— %s",
+                    entity.modelPath.empty() ? "no model"
+                    : fs::path(entity.modelPath).filename().string().c_str());
+        
+                // --- Gizmo ---
+                {
+                    glm::mat4 matrix = glm::mat4(1.0f);
+                    matrix = glm::translate(matrix, entity.position);
+                    matrix = glm::rotate(matrix, glm::radians(entity.rotation.x), glm::vec3(1, 0, 0));
+                    matrix = glm::rotate(matrix, glm::radians(entity.rotation.y), glm::vec3(0, 1, 0));
+                    matrix = glm::rotate(matrix, glm::radians(entity.rotation.z), glm::vec3(0, 0, 1));
+                    matrix = glm::scale(matrix, entity.scale);
+        
+                    ImGuizmo::OPERATION operation = ImGuizmo::TRANSLATE;
+                    if (currentGizmo == GizmoType::Translate) operation = ImGuizmo::TRANSLATE;
+                    else if (currentGizmo == GizmoType::Rotate) operation = ImGuizmo::ROTATE;
+                    else if (currentGizmo == GizmoType::Scale) operation = ImGuizmo::SCALE;
+        
+                    static bool useLocal = true;
+        
+                    if (ImGuizmo::Manipulate(
+                        glm::value_ptr(viewMatrix),
+                        glm::value_ptr(proj),
+                        operation,
+                        useLocal ? ImGuizmo::LOCAL : ImGuizmo::WORLD,
+                        glm::value_ptr(matrix)))
+                    {
+                        glm::vec3 translation, scale;
+                        glm::quat rotation;
+                        glm::vec3 skew;
+                        glm::vec4 perspective;
+        
+                        if (glm::decompose(matrix, scale, rotation, translation, skew, perspective)) {
+                            entity.position = translation;
+                            entity.rotation = glm::degrees(glm::eulerAngles(rotation));
+                            entity.scale = scale;
+                            pushUndo();
+                        }
+                    }
+                }
+        
+                if (ImGui::BeginTabBar("EntityTabs", ImGuiTabBarFlags_None)) {
+        
+                    // ====================================================
+                    //                    TRANSFORM
+                    // ====================================================
+                    if (ImGui::BeginTabItem("Transform")) {
+                        ImGui::Spacing();
+        
+                        ImGui::TextDisabled("POSITION");
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::DragFloat3("##Pos", &entity.position.x, 0.05f, 0, 0, "%.3f"))
+                            if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+        
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("ROTATION (deg)");
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::DragFloat3("##Rot", &entity.rotation.x, 0.5f, 0, 0, "%.1f"))
+                            if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+        
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("SCALE");
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::DragFloat3("##Scl", &entity.scale.x, 0.05f, 0.001f, 1000.0f, "%.3f"))
+                            if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+        
+                        ImGui::Spacing();
+        
+                        float btnW = (ImGui::GetContentRegionAvail().x - 8.0f) / 3.0f;
+                        if (ImGui::Button("Reset P", ImVec2(btnW, 0))) { pushUndo(); entity.position = glm::vec3(0.0f); }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Reset R", ImVec2(btnW, 0))) { pushUndo(); entity.rotation = glm::vec3(0.0f); }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Reset S", ImVec2(btnW, 0))) { pushUndo(); entity.scale = glm::vec3(1.0f); }
+        
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Spacing();
+        
+                        ImGui::TextDisabled("TYPE");
+                        const char* typeNames[] = {
+                            "Static", "Player", "Ball", "Camera", "Empty",
+                            "Point Light", "Spot Light", "Directional Light", "Ambient Light"
+                        };
+                        int typeIndex = (int)entity.type;
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::Combo("##Type", &typeIndex, typeNames, 9)) {
+                            pushUndo();
+                            entity.type = (EntityType)typeIndex;
+                        }
+        
+                        ImGui::EndTabItem();
+                    }
+        
+                    // ====================================================
+                    //                    MATERIAL
+                    // ====================================================
+                    if (ImGui::BeginTabItem("Material")) {
+                    auto& slots = entity.materialSlots;
+                
+                    // ============================================================
+                    //  AUTO-CREATE SLOTS: ensure every mesh has a material slot
+                    // ============================================================
+                    if (entity.model && !entity.model->meshes.empty() &&
+                        slots.size() != entity.model->meshes.size())
+                    {
+                        // Build a coverage map
+                        std::vector<bool> covered(entity.model->meshes.size(), false);
+                        for (const auto& slot : slots) {
+                            if (slot.meshIndex >= 0 && slot.meshIndex < (int)covered.size())
+                                covered[slot.meshIndex] = true;
+                        }
+                
+                        // Add missing slots
+                        for (size_t mi = 0; mi < entity.model->meshes.size(); ++mi) {
+                            if (covered[mi]) continue;
+                
+                            const Mesh& m = entity.model->meshes[mi];
+                            MaterialSlot newSlot;
+                            newSlot.meshIndex = (int)mi;
+                            newSlot.name = "Material " + std::to_string(mi);
+                
+                            newSlot.material.baseColorFactor   = m.baseColorFactor;
+                            newSlot.material.albedo            = glm::vec3(m.baseColorFactor);
+                            newSlot.material.metallic          = m.metallicFactor;
+                            newSlot.material.roughness         = m.roughnessFactor;
+                            newSlot.material.emissiveFactor    = m.emissiveFactor;
+                            newSlot.material.emissiveColor     = m.emissiveFactor;
+                            newSlot.material.emissiveStrength  = m.emissiveStrength;
+                            newSlot.material.emissiveIntensity = m.emissiveStrength;
+                
+                            newSlot.material.hasBaseColorTexture = m.hasBaseColorTexture;
+                            newSlot.material.hasMRTexture        = m.hasMRTexture;
+                            newSlot.material.hasNormalTexture    = m.hasNormalTexture;
+                            newSlot.material.hasEmissiveTexture  = m.hasEmissiveTexture;
+                            newSlot.material.hasAOTexture        = m.hasAOTexture;
+                
+                            newSlot.material.useAlbedoMap            = m.hasBaseColorTexture ? 1 : 0;
+                            newSlot.material.useMetallicRoughnessMap = m.hasMRTexture        ? 1 : 0;
+                            newSlot.material.useNormalMap            = m.hasNormalTexture    ? 1 : 0;
+                            newSlot.material.useEmissiveMap          = m.hasEmissiveTexture  ? 1 : 0;
+                            newSlot.material.useAOMap                = m.hasAOTexture        ? 1 : 0;
+                
+                            // Copy textures from mesh
+                            for (const auto& tex : m.textures) {
+                                if (tex.type == "diffuse" && tex.ID != 0) {
+                                    newSlot.material.customAlbedoID = tex.ID;
+                                    newSlot.material.albedoMapPath  = tex.path;
+                                }
+                                else if (tex.type == "normal" && tex.ID != 0) {
+                                    newSlot.material.customNormalID = tex.ID;
+                                    newSlot.material.normalMapPath  = tex.path;
+                                }
+                                else if (tex.type == "metallicRoughness" && tex.ID != 0) {
+                                    newSlot.material.customMRID = tex.ID;
+                                    newSlot.material.metallicRoughnessMapPath = tex.path;
+                                }
+                                else if (tex.type == "emissive" && tex.ID != 0) {
+                                    newSlot.material.customEmissiveID = tex.ID;
+                                    newSlot.material.emissiveMapPath  = tex.path;
+                                }
+                                else if (tex.type == "ao" && tex.ID != 0) {
+                                    newSlot.material.customAOID = tex.ID;
+                                    newSlot.material.aoMapPath  = tex.path;
+                                }
+                            }
+                
+                            slots.push_back(newSlot);
+                        }
+                
+                        // Sort by meshIndex for stable display order
+                        std::sort(slots.begin(), slots.end(),
+                            [](const MaterialSlot& a, const MaterialSlot& b) {
+                                return a.meshIndex < b.meshIndex;
+                            });
+                
+                        // Auto-select first slot if none selected
+                        if (entity.selectedMaterialSlot < 0 && !slots.empty()) {
+                            entity.selectedMaterialSlot = 0;
+                            entity.material = slots[0].material;
+                        }
+                    }
+                
+                    // ============================================================
+                    //  TOOLBAR: Debug + Rebuild
+                    // ============================================================
+                    ImGui::Checkbox("Show Mesh Outline", &showMaterialDebugBox);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Highlights the mesh of the selected slot in the viewport");
+                
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Rebuild All")) {
                         pushUndo();
-                        std::cout << "Entity transformed!" << std::endl;
+                        entity.materialSlots.clear();
+                        entity.selectedMaterialSlot = -1;
+                        // Next frame the auto-create block above will rebuild
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Discards all slots and rebuilds from mesh data");
+                
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+                
+                    // ============================================================
+                    //  MATERIAL SLOTS LIST
+                    // ============================================================
+                    ImGui::TextDisabled("MATERIAL SLOTS  (%zu / %zu)",
+                        slots.size(),
+                        entity.model ? entity.model->meshes.size() : (size_t)0);
+                
+                    if (slots.empty()) {
+                        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                            "No materials — model has no meshes.");
+                    }
+                    else {
+                        // --- Slot list ---
+                        float slotListHeight = 120.0f;
+                        ImGui::BeginChild("SlotList", ImVec2(0, slotListHeight), true);
+                
+                        for (int i = 0; i < (int)slots.size(); ++i) {
+                            ImGui::PushID(i);
+                
+                            bool isSel = (entity.selectedMaterialSlot == i);
+                
+                            // Compose label
+                            std::string label = "[M] " + std::to_string(i) + "  —  " + slots[i].name
+                                              + "  (mesh " + std::to_string(slots[i].meshIndex) + ")";
+                
+                            // Highlight the currently-edited slot with the debug color
+                            if (isSel) {
+                                ImGui::PushStyleColor(ImGuiCol_Text,
+                                    ImVec4(materialDebugBoxColor.r,
+                                           materialDebugBoxColor.g,
+                                           materialDebugBoxColor.b, 1.0f));
+                            }
+                            if (ImGui::Selectable(label.c_str(), isSel)) {
+                                entity.selectedMaterialSlot = i;
+                                entity.material = slots[i].material;
+                            }
+                            if (isSel) ImGui::PopStyleColor();
+                
+                            // Tooltip
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::BeginTooltip();
+                                ImGui::Text("Slot:   %d", i);
+                                ImGui::Text("Mesh:   %d", slots[i].meshIndex);
+                                ImGui::Text("Name:   %s", slots[i].name.c_str());
+                                ImGui::Separator();
+                                ImGui::Text("Base Color:  (%.2f, %.2f, %.2f, %.2f)",
+                                    slots[i].material.baseColorFactor.r,
+                                    slots[i].material.baseColorFactor.g,
+                                    slots[i].material.baseColorFactor.b,
+                                    slots[i].material.baseColorFactor.a);
+                                ImGui::Text("Metallic:    %.2f", slots[i].material.metallic);
+                                ImGui::Text("Roughness:   %.2f", slots[i].material.roughness);
+                                ImGui::Text("Emissive I.: %.2f", slots[i].material.emissiveIntensity);
+                
+                                // Show mesh vertex count as a sanity indicator
+                                if (entity.model &&
+                                    slots[i].meshIndex >= 0 &&
+                                    slots[i].meshIndex < (int)entity.model->meshes.size()) {
+                                    const Mesh& mm = entity.model->meshes[slots[i].meshIndex];
+                                    ImGui::Separator();
+                                    ImGui::Text("Verts:    %zu", mm.vertices.size());
+                                    ImGui::Text("Indices:  %zu", mm.indices.size());
+                                    ImGui::Text("Textures: %zu", mm.textures.size());
+                                }
+                                ImGui::EndTooltip();
+                            }
+                
+                            // Right-click context menu
+                            if (ImGui::BeginPopupContextItem("SlotCtx")) {
+                                if (ImGui::MenuItem("Focus Camera on Mesh")) {
+                                    if (entity.model &&
+                                        slots[i].meshIndex >= 0 &&
+                                        slots[i].meshIndex < (int)entity.model->meshes.size()) {
+                                        const Mesh& mm = entity.model->meshes[slots[i].meshIndex];
+                
+                                        // Compute mesh center in world space
+                                        glm::vec3 center = (mm.aabbMin + mm.aabbMax) * 0.5f;
+                                        glm::mat4 meshLocal = glm::mat4(1.0f);
+                                        if (slots[i].meshIndex < (int)entity.model->matricesMeshes.size())
+                                            meshLocal = entity.model->matricesMeshes[slots[i].meshIndex];
+                
+                                        glm::mat4 world = glm::mat4(1.0f);
+                                        world = glm::rotate(world, glm::radians(entity.rotation.x), glm::vec3(1, 0, 0));
+                                        world = glm::rotate(world, glm::radians(entity.rotation.y), glm::vec3(0, 1, 0));
+                                        world = glm::rotate(world, glm::radians(entity.rotation.z), glm::vec3(0, 0, 1));
+                                        world = glm::translate(world, entity.position);
+                                        world = glm::scale(world, entity.scale);
+                
+                                        glm::vec3 worldCenter = glm::vec3(world * meshLocal * glm::vec4(center, 1.0f));
+                                        camera.Position = worldCenter + glm::vec3(0.0f, 2.0f, 5.0f);
+                                    }
+                                }
+                
+                                if (ImGui::MenuItem("Reset to glTF")) {
+                                    if (entity.model &&
+                                        slots[i].meshIndex >= 0 &&
+                                        slots[i].meshIndex < (int)entity.model->meshes.size()) {
+                                        const Mesh& m = entity.model->meshes[slots[i].meshIndex];
+                                        slots[i].material.baseColorFactor = m.baseColorFactor;
+                                        slots[i].material.albedo          = glm::vec3(m.baseColorFactor);
+                                        slots[i].material.metallic        = m.metallicFactor;
+                                        slots[i].material.roughness       = m.roughnessFactor;
+                                        slots[i].material.emissiveFactor  = m.emissiveFactor;
+                                        slots[i].material.emissiveColor   = m.emissiveFactor;
+                                        slots[i].material.emissiveStrength  = m.emissiveStrength;
+                                        slots[i].material.emissiveIntensity = m.emissiveStrength;
+                                    }
+                                }
+                
+                                ImGui::EndPopup();
+                            }
+                
+                            ImGui::PopID();
+                        }
+                        ImGui::EndChild();
+                
+                        // --- Slot action row ---
+                        float w = (ImGui::GetContentRegionAvail().x - 12.0f) / 5.0f;
+                
+                        if (ImGui::Button("+", ImVec2(w, 0))) {
+                            pushUndo();
+                            MaterialSlot s;
+                            s.meshIndex = 0;
+                            s.name      = "New Material " + std::to_string(slots.size());
+                            slots.push_back(s);
+                            entity.selectedMaterialSlot = (int)slots.size() - 1;
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add empty material slot");
+                
+                        ImGui::SameLine();
+                        if (ImGui::Button("-", ImVec2(w, 0))) {
+                            if (entity.selectedMaterialSlot >= 0 &&
+                                entity.selectedMaterialSlot < (int)slots.size() &&
+                                slots.size() > 1) {
+                                pushUndo();
+                                slots.erase(slots.begin() + entity.selectedMaterialSlot);
+                                entity.selectedMaterialSlot = 0;
+                            }
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove selected slot");
+                
+                        ImGui::SameLine();
+                        if (ImGui::Button("Up", ImVec2(w, 0))) {
+                            int i = entity.selectedMaterialSlot;
+                            if (i > 0) {
+                                std::swap(slots[i], slots[i - 1]);
+                                entity.selectedMaterialSlot = i - 1;
+                            }
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Down", ImVec2(w, 0))) {
+                            int i = entity.selectedMaterialSlot;
+                            if (i >= 0 && i < (int)slots.size() - 1) {
+                                std::swap(slots[i], slots[i + 1]);
+                                entity.selectedMaterialSlot = i + 1;
+                            }
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Apply", ImVec2(w, 0))) {
+                            // Apply current entity.material to all selected slot's mesh
+                            if (entity.selectedMaterialSlot >= 0 &&
+                                entity.selectedMaterialSlot < (int)slots.size()) {
+                                slots[entity.selectedMaterialSlot].material = entity.material;
+                            }
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Copy current 'entity.material' to this slot");
+                
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Spacing();
+                    }
+                
+                    // ============================================================
+                    //  SELECTED SLOT PROPERTIES
+                    // ============================================================
+                    if (entity.selectedMaterialSlot >= 0 &&
+                        entity.selectedMaterialSlot < (int)slots.size())
+                    {
+                        Material& mat = slots[entity.selectedMaterialSlot].material;
+                
+                        // --- Header ---
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.85f, 1.0f, 1.0f));
+                        ImGui::Text("Editing Slot %d", entity.selectedMaterialSlot);
+                        ImGui::PopStyleColor();
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(mesh %d)", slots[entity.selectedMaterialSlot].meshIndex);
+                
+                        // --- Rename ---
+                        char nameBuf[64];
+                        strncpy_s(nameBuf, sizeof(nameBuf),
+                            slots[entity.selectedMaterialSlot].name.c_str(), _TRUNCATE);
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::InputText("##SlotName", nameBuf, sizeof(nameBuf))) {
+                            slots[entity.selectedMaterialSlot].name = nameBuf;
+                        }
+                
+                        // --- Mesh Index (allow reassignment) ---
+                        int meshIdxVal = slots[entity.selectedMaterialSlot].meshIndex;
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::InputInt("##MeshIndex", &meshIdxVal)) {
+                            if (entity.model) {
+                                int maxIdx = (int)entity.model->meshes.size() - 1;
+                                meshIdxVal = glm::clamp(meshIdxVal, 0, maxIdx);
+                            }
+                            slots[entity.selectedMaterialSlot].meshIndex = meshIdxVal;
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Which mesh this material drives (0-based)");
+                
+                        ImGui::Spacing();
+                
+                        // --- Base Color ---
+                        if (ImGui::CollapsingHeader("Base Color", ImGuiTreeNodeFlags_DefaultOpen)) {
+                            ImGui::Checkbox("Use Base Color Map##Slot", (bool*)&mat.useAlbedoMap);
+                
+                            if (mat.useAlbedoMap) {
+                                if (ImGui::Button("Load##AlbedoSlot", ImVec2(70, 0))) {
+                                    std::string path = OpenFileDialog("Select Base Color",
+                                        "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
+                                    if (!path.empty()) {
+                                        pushUndo();
+                                        mat.albedoMapPath = path;
+                                        mat.customAlbedoID = LoadTextureFromFile(path);
+                                        mat.useAlbedoMap = 1;
+                                    }
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::Button("Clear##AlbedoSlot", ImVec2(70, 0))) {
+                                    pushUndo();
+                                    mat.albedoMapPath = "";
+                                    mat.customAlbedoID = 0;
+                                    mat.useAlbedoMap = 0;
+                                }
+                                if (!mat.albedoMapPath.empty())
+                                    ImGui::TextDisabled("%s",
+                                        fs::path(mat.albedoMapPath).filename().string().c_str());
+                            } else {
+                                if (ImGui::ColorEdit3("Albedo Color##Slot", &mat.albedo[0],
+                                    ImGuiColorEditFlags_Float))
+                                    if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                            }
+                
+                            if (ImGui::DragFloat4("Base Color Factor##Slot", &mat.baseColorFactor.x,
+                                0.01f, 0.0f, 1.0f, "%.3f"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                        }
+                
+                        // --- Metallic / Roughness ---
+                        if (ImGui::CollapsingHeader("Metallic / Roughness", ImGuiTreeNodeFlags_DefaultOpen)) {
+                            ImGui::Checkbox("Use MR Map##Slot", (bool*)&mat.useMetallicRoughnessMap);
+                
+                            if (mat.useMetallicRoughnessMap) {
+                                if (ImGui::Button("Load##MRSlot", ImVec2(70, 0))) {
+                                    std::string path = OpenFileDialog("Select MR Map",
+                                        "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
+                                    if (!path.empty()) {
+                                        pushUndo();
+                                        mat.metallicRoughnessMapPath = path;
+                                        mat.customMRID = LoadTextureFromFile(path);
+                                        mat.useMetallicRoughnessMap = 1;
+                                    }
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::Button("Clear##MRSlot", ImVec2(70, 0))) {
+                                    pushUndo();
+                                    mat.metallicRoughnessMapPath = "";
+                                    mat.customMRID = 0;
+                                    mat.useMetallicRoughnessMap = 0;
+                                }
+                                if (!mat.metallicRoughnessMapPath.empty())
+                                    ImGui::TextDisabled("%s",
+                                        fs::path(mat.metallicRoughnessMapPath).filename().string().c_str());
+                            }
+                
+                            if (ImGui::SliderFloat("Metallic##Slot", &mat.metallic, 0.0f, 1.0f, "%.2f"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                
+                            if (ImGui::SliderFloat("Roughness##Slot", &mat.roughness, 0.0f, 1.0f, "%.2f"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                        }
+                
+                        // --- Normal ---
+                        if (ImGui::CollapsingHeader("Normal")) {
+                            ImGui::Checkbox("Use Normal Map##Slot", (bool*)&mat.useNormalMap);
+                
+                            if (mat.useNormalMap) {
+                                if (ImGui::Button("Load##NormalSlot", ImVec2(70, 0))) {
+                                    std::string path = OpenFileDialog("Select Normal Map",
+                                        "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
+                                    if (!path.empty()) {
+                                        pushUndo();
+                                        mat.normalMapPath = path;
+                                        mat.customNormalID = LoadTextureFromFile(path);
+                                        mat.useNormalMap = 1;
+                                    }
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::Button("Clear##NormalSlot", ImVec2(70, 0))) {
+                                    pushUndo();
+                                    mat.normalMapPath = "";
+                                    mat.customNormalID = 0;
+                                    mat.useNormalMap = 0;
+                                }
+                                if (!mat.normalMapPath.empty())
+                                    ImGui::TextDisabled("%s",
+                                        fs::path(mat.normalMapPath).filename().string().c_str());
+                            }
+                
+                            if (ImGui::SliderFloat("Normal Strength##Slot", &mat.normalStrength, 0.0f, 2.0f, "%.2f"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                        }
+                
+                        // --- AO ---
+                        if (ImGui::CollapsingHeader("Ambient Occlusion")) {
+                            ImGui::Checkbox("Use AO Map##Slot", (bool*)&mat.useAOMap);
+                
+                            if (mat.useAOMap) {
+                                if (ImGui::Button("Load##AOSlot", ImVec2(70, 0))) {
+                                    std::string path = OpenFileDialog("Select AO Map",
+                                        "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
+                                    if (!path.empty()) {
+                                        pushUndo();
+                                        mat.aoMapPath = path;
+                                        mat.customAOID = LoadTextureFromFile(path);
+                                        mat.useAOMap = 1;
+                                    }
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::Button("Clear##AOSlot", ImVec2(70, 0))) {
+                                    pushUndo();
+                                    mat.aoMapPath = "";
+                                    mat.customAOID = 0;
+                                    mat.useAOMap = 0;
+                                }
+                                if (!mat.aoMapPath.empty())
+                                    ImGui::TextDisabled("%s",
+                                        fs::path(mat.aoMapPath).filename().string().c_str());
+                            }
+                
+                            if (ImGui::SliderFloat("AO Amount##Slot", &mat.ao, 0.0f, 1.0f, "%.2f"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                        }
+                
+                        // --- Height ---
+                        if (ImGui::CollapsingHeader("Height / Displacement")) {
+                            ImGui::Checkbox("Use Height Map##Slot", (bool*)&mat.useHeightMap);
+                
+                            if (mat.useHeightMap) {
+                                if (ImGui::Button("Load##HeightSlot", ImVec2(70, 0))) {
+                                    std::string path = OpenFileDialog("Select Height Map",
+                                        "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
+                                    if (!path.empty()) {
+                                        pushUndo();
+                                        mat.heightMapPath = path;
+                                        mat.customHeightID = LoadTextureFromFile(path);
+                                        mat.useHeightMap = 1;
+                                    }
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::Button("Clear##HeightSlot", ImVec2(70, 0))) {
+                                    pushUndo();
+                                    mat.heightMapPath = "";
+                                    mat.customHeightID = 0;
+                                    mat.useHeightMap = 0;
+                                }
+                                if (!mat.heightMapPath.empty())
+                                    ImGui::TextDisabled("%s",
+                                        fs::path(mat.heightMapPath).filename().string().c_str());
+                            }
+                
+                            if (ImGui::SliderFloat("Height Scale##Slot", &mat.heightScale, 0.0f, 0.2f, "%.4f"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                        }
+                
+                        // --- Emissive ---
+                        if (ImGui::CollapsingHeader("Emissive")) {
+                            ImGui::Checkbox("Use Emissive Map##Slot", (bool*)&mat.useEmissiveMap);
+                
+                            if (mat.useEmissiveMap) {
+                                if (ImGui::Button("Load##EmissiveSlot", ImVec2(70, 0))) {
+                                    std::string path = OpenFileDialog("Select Emissive Map",
+                                        "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
+                                    if (!path.empty()) {
+                                        pushUndo();
+                                        mat.emissiveMapPath = path;
+                                        mat.customEmissiveID = LoadTextureFromFile(path);
+                                        mat.useEmissiveMap = 1;
+                                    }
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::Button("Clear##EmissiveSlot", ImVec2(70, 0))) {
+                                    pushUndo();
+                                    mat.emissiveMapPath = "";
+                                    mat.customEmissiveID = 0;
+                                    mat.useEmissiveMap = 0;
+                                }
+                                if (!mat.emissiveMapPath.empty())
+                                    ImGui::TextDisabled("%s",
+                                        fs::path(mat.emissiveMapPath).filename().string().c_str());
+                            }
+                
+                            if (ImGui::ColorEdit3("Emissive Color##Slot", &mat.emissiveColor[0],
+                                ImGuiColorEditFlags_Float))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                
+                            if (ImGui::SliderFloat("Emissive Intensity##Slot",
+                                &mat.emissiveIntensity, 0.0f, 10.0f, "%.2f"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                        }
+                
+                        // --- SSS ---
+                        if (ImGui::CollapsingHeader("Subsurface Scattering")) {
+                            ImGui::Checkbox("SSS Enabled##Slot", &mat.sssEnabled);
+                            if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                
+                            if (ImGui::SliderFloat("SSS Intensity##Slot", &mat.sssIntensity, 0.0f, 5.0f, "%.2f"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                
+                            if (ImGui::SliderFloat("SSS Mask##Slot", &mat.sssMask, 0.0f, 1.0f, "%.2f"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                        }
+                
+                        // ==========================================
+                        //  SYNC SLOT → MESH (live preview)
+                        // ==========================================
+                        if (entity.model &&
+                            entity.selectedMaterialSlot < (int)entity.materialSlots.size()) {
+                            int mi = entity.materialSlots[entity.selectedMaterialSlot].meshIndex;
+                            if (mi >= 0 && mi < (int)entity.model->meshes.size()) {
+                                Mesh& m = entity.model->meshes[mi];
+                                m.baseColorFactor  = mat.baseColorFactor;
+                                m.metallicFactor   = mat.metallic;
+                                m.roughnessFactor  = mat.roughness;
+                                m.emissiveFactor   = mat.emissiveFactor;
+                                m.emissiveStrength = mat.emissiveStrength;
+                            }
+                        }
+                    }
+                
+                    ImGui::EndTabItem();
+                }
+                    // ====================================================
+                    //                    LIGHT
+                    // ====================================================
+                    bool isLight = (entity.type == EntityType::PointLight ||
+                                    entity.type == EntityType::SpotLight ||
+                                    entity.type == EntityType::DirectionalLight ||
+                                    entity.type == EntityType::AmbientLight);
+        
+                    if (isLight && ImGui::BeginTabItem("Light")) {
+                        auto& light = entity.light;
+                        ImGui::Spacing();
+        
+                        if (ImGui::Checkbox("Light Enabled", &light.enabled))
+                            if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+        
+                        if (ImGui::ColorEdit3("Light Color", &light.color[0], ImGuiColorEditFlags_Float))
+                            if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+        
+                        if (ImGui::SliderFloat("Light Intensity", &light.intensity, 0.0f, 20.0f, "%.2f"))
+                            if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+        
+                        if (entity.type == EntityType::PointLight ||
+                            entity.type == EntityType::SpotLight) {
+                            if (ImGui::SliderFloat("Light Range", &light.range, 0.1f, 100.0f, "%.1f"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                        }
+        
+                        if (entity.type == EntityType::SpotLight) {
+                            if (ImGui::SliderFloat("Inner Cone", &light.innerConeAngle, 0.0f, 45.0f, "%.1f deg"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                            if (ImGui::SliderFloat("Outer Cone", &light.outerConeAngle, 1.0f, 90.0f, "%.1f deg"))
+                                if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo();
+                        }
+        
+                        ImGui::EndTabItem();
+                    }
+        
+                    
+                    // =====================================================
+                    //                   ANIMATION
+                    // =====================================================
+                    if (ImGui::BeginTabItem("Animation")) {
+                        auto& p = entity.animPlayer;   // requires EditorEntity::animPlayer to exist
+
+                    if (!entity.model) {
+                        ImGui::TextDisabled("No model loaded.");
+                    } else if (entity.model->animations.empty()) {
+                        ImGui::TextDisabled("No animations in this model.");
+                    } else {
+                        // Clip selector
+                        std::vector<const char*> names;
+                        names.reserve(entity.model->animations.size());
+                        for (auto& a : entity.model->animations)
+                            names.push_back(a.name.c_str());
+
+                        // clamp in case currentClip was restored out of range
+                        if (p.currentClip < 0 || p.currentClip >= (int)names.size())
+                            p.currentClip = 0;
+
+                        if (ImGui::Combo("Clip", &p.currentClip, names.data(), (int)names.size())) {
+                            // clip changed → reset time
+                            p.currentTime = 0.0f;
+                            p.playing = true;
+                        }
+
+                        ImGui::Checkbox("Playing", &p.playing);
+                        ImGui::SameLine();
+                        ImGui::Checkbox("Loop", &p.loop);
+
+                        ImGui::SliderFloat("Speed", &p.playbackSpeed, 0.0f, 4.0f, "%.2f");
+
+                        float dur = entity.model->animations[p.currentClip].duration;
+                        if (ImGui::SliderFloat("Time", &p.currentTime, 0.0f, dur, "%.3f"))
+                            p.playing = false;   // scrubbing pauses
+
+                        ImGui::SameLine();
+                        if (ImGui::Button("Reset##anim")) {
+                            p.currentTime = 0.0f;
+                            p.playing = true;
+                        }
                     }
                 }
 
-                ImGui::Separator();
-                ImGui::Text("Selected: %d", selectedEntity);
-
-                bool changed = false;
-                if (ImGui::DragFloat3("Position", &entity.position.x, 0.1f)) changed = true;
-                if (ImGui::DragFloat3("Rotation (deg)", &entity.rotation.x, 1.0f)) changed = true;
-                if (ImGui::DragFloat3("Scale", &entity.scale.x, 0.05f)) changed = true;
-
-                if (changed && ImGui::IsItemDeactivatedAfterEdit()) {
-                    pushUndo();
-                }
-
-                const char* typeNames[] = { "Static", "Player", "Ball", "Camera", "Empty", "Point Light", "Spot Light", "Directional Light", "Ambient Light" };
-                int typeIndex = static_cast<int>(entity.type);
-                if (ImGui::Combo("Type", &typeIndex, typeNames, 9)) {
-                    pushUndo();
-                    entity.type = static_cast<EntityType>(typeIndex);
-                }
-
-                // ============================================================
-                //                      SCRIPT SELECTOR
-                // ============================================================
-                // Only for non-light entities
-                if (entity.type != EntityType::PointLight &&
-                    entity.type != EntityType::SpotLight &&
-                    entity.type != EntityType::DirectionalLight &&
-                    entity.type != EntityType::AmbientLight)
-                {
-                    if (ImGui::CollapsingHeader("Script", ImGuiTreeNodeFlags_DefaultOpen)) {
-
-                        // Lazy-scan on first open
+                    // ====================================================
+                    //                    SCRIPT
+                    // ====================================================
+                    if (!isLight && ImGui::BeginTabItem("Script")) {
                         if (!scriptsScanned) {
                             scriptFiles = scanScriptsFolder("Scripts/");
                             scriptsScanned = true;
                             std::cout << "[Scripts] Found " << scriptFiles.size() << " script(s)." << std::endl;
                         }
-
-                        // ---- Current script display ----
+        
                         std::string currentScript = "";
                         bool hasScript = (entity.script && entity.script->isLoaded());
                         if (hasScript) currentScript = entity.script->scriptPath;
-
+        
                         std::string displayName = hasScript
                             ? fs::path(currentScript).filename().string()
                             : "(none)";
-
-                        ImGui::Text("Current:");
-                        ImGui::SameLine();
+        
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("CURRENT SCRIPT");
                         ImGui::TextColored(
                             hasScript ? ImVec4(0.4f, 0.9f, 0.4f, 1.0f) : ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
                             "%s", displayName.c_str());
-
-                        // ---- Combo to pick a script ----
+        
+                        ImGui::Spacing();
+                        ImGui::SetNextItemWidth(-1);
                         if (ImGui::BeginCombo("##ScriptCombo", displayName.c_str())) {
-
-                            // ---- "(none)" option ----
                             bool noneSelected = !hasScript;
                             if (ImGui::Selectable("(none)", noneSelected)) {
                                 pushUndo();
                                 if (entity.script) entity.script->destroy();
                                 entity.script = nullptr;
-                                std::cout << "[Script] Cleared script from entity " << selectedEntity << std::endl;
                             }
                             if (noneSelected) ImGui::SetItemDefaultFocus();
-
-                            // ---- Script list ----
+        
                             for (const auto& scriptPath : scriptFiles) {
                                 std::string filename = fs::path(scriptPath).filename().string();
                                 bool isSelected = (scriptPath == currentScript);
-
+        
                                 ImGui::PushID(scriptPath.c_str());
                                 if (ImGui::Selectable(filename.c_str(), isSelected)) {
                                     pushUndo();
-                                    // Destroy previous
                                     if (entity.script) entity.script->destroy();
-
-                                    // Create new
                                     entity.script = std::make_shared<ScriptComponent>(
                                         lua, scriptPath, selectedEntity);
-
-                                    if (entity.script->isLoaded()) {
-                                        entity.script->start();
-                                        std::cout << "[Script] Loaded and started: " << filename
-                                            << " on entity " << selectedEntity << std::endl;
-                                    }
-                                    else {
-                                        std::cout << "[Script] Failed to load: " << scriptPath << std::endl;
-                                    }
+                                    if (entity.script->isLoaded()) entity.script->start();
                                 }
                                 if (isSelected) ImGui::SetItemDefaultFocus();
-
-                                // Tooltip with full path
-                                if (ImGui::IsItemHovered()) {
-                                    ImGui::SetTooltip("%s", scriptPath.c_str());
-                                }
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", scriptPath.c_str());
                                 ImGui::PopID();
                             }
-
                             ImGui::EndCombo();
                         }
-
-                        // ---- Buttons row ----
-                        ImGui::SameLine();
-                        if (ImGui::SmallButton("Refresh")) {
+        
+                        float btnW = (ImGui::GetContentRegionAvail().x - 8.0f) / 3.0f;
+                        if (ImGui::Button("Refresh", ImVec2(btnW, 0)))
                             scriptFiles = scanScriptsFolder("Scripts/");
-                            std::cout << "[Scripts] Rescanned: " << scriptFiles.size() << " script(s)." << std::endl;
+                        ImGui::SameLine();
+                        if (hasScript && ImGui::Button("Reload", ImVec2(btnW, 0))) {
+                            pushUndo();
+                            std::string path = entity.script->scriptPath;
+                            entity.script->destroy();
+                            entity.script = std::make_shared<ScriptComponent>(lua, path, selectedEntity);
+                            if (entity.script->isLoaded()) entity.script->start();
                         }
-
-                        if (hasScript) {
+                        ImGui::SameLine();
+                        if (hasScript && ImGui::Button("Clear", ImVec2(btnW, 0))) {
+                            pushUndo();
+                            entity.script->destroy();
+                            entity.script = nullptr;
+                        }
+        
+                        if (entity.script || !entity.scriptParams.empty()) {
+                            ImGui::Spacing();
+                            ImGui::Separator();
+                            ImGui::Spacing();
+                            ImGui::TextDisabled("SCRIPT PARAMETERS");
+        
+                            auto& params = entity.scriptParams;
+                            int toDelete = -1;
+        
+                            if (ImGui::BeginTable("ScriptParams", 3,
+                                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                ImGuiTableFlags_SizingStretchProp))
+                            {
+                                ImGui::TableSetupColumn("Name",  ImGuiTableColumnFlags_WidthStretch, 0.4f);
+                                ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 0.5f);
+                                ImGui::TableSetupColumn("##",    ImGuiTableColumnFlags_WidthFixed,   25.0f);
+                                ImGui::TableHeadersRow();
+        
+                                for (int i = 0; i < (int)params.size(); ++i) {
+                                    ImGui::PushID(i);
+                                    ImGui::TableNextRow();
+                                    ImGui::TableNextColumn();
+                                    char buf[64];
+                                    strncpy_s(buf, sizeof(buf), params[i].name.c_str(), _TRUNCATE);
+                                    ImGui::SetNextItemWidth(-1);
+                                    if (ImGui::InputText("##pn", buf, sizeof(buf)))
+                                        params[i].name = buf;
+        
+                                    ImGui::TableNextColumn();
+                                    ImGui::SetNextItemWidth(-1);
+                                    ImGui::DragFloat("##pv", &params[i].value, 0.01f);
+        
+                                    ImGui::TableNextColumn();
+                                    if (ImGui::SmallButton("X")) toDelete = i;
+                                    ImGui::PopID();
+                                }
+                                ImGui::EndTable();
+                            }
+        
+                            if (toDelete >= 0) { pushUndo(); params.erase(params.begin() + toDelete); }
+        
+                            if (ImGui::Button("+ Add Parameter")) {
+                                pushUndo();
+                                params.push_back({ "new_param", 0.0f });
+                            }
                             ImGui::SameLine();
-                            if (ImGui::SmallButton("Reload")) {
+                            if (ImGui::Button("Clear All Parameters")) {
                                 pushUndo();
-                                std::string path = entity.script->scriptPath;
-                                entity.script->destroy();
-                                entity.script = std::make_shared<ScriptComponent>(
-                                    lua, path, selectedEntity);
-                                if (entity.script->isLoaded()) {
-                                    entity.script->start();
-                                    std::cout << "[Script] Reloaded: " << path << std::endl;
-                                }
+                                params.clear();
                             }
-
-                            if (ImGui::SmallButton("Clear")) {
+                        }
+        
+                        ImGui::EndTabItem();
+                    }
+        
+                    // ====================================================
+                    //                    PHYSICS
+                    // ====================================================
+                    if (!isLight && ImGui::BeginTabItem("Physics")) {
+                        ImGui::Spacing();
+                        ImGui::Checkbox("Simulate Physics", &entity.simulatePhysics);
+        
+                        ImGui::Spacing();
+                        if (entity.simulatePhysics)
+                            ImGui::TextDisabled("Physics body active during Play mode");
+                        else {
+                            if (ImGui::Button("Generate Physics Body", ImVec2(-1, 0))) {
+                                GeneratePhysicsBody(entity);
                                 pushUndo();
-                                entity.script->destroy();
-                                entity.script = nullptr;
-                                std::cout << "[Script] Cleared from entity " << selectedEntity << std::endl;
                             }
                         }
-
-                        // ---- Info line ----
-                        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-                            "%zu script(s) available in Scripts/", scriptFiles.size());
+                        ImGui::EndTabItem();
                     }
-
-
+        
+                    ImGui::EndTabBar();
                 }
-
-                // ============================================================
-//                   SCRIPT PARAMETERS UI
-// ============================================================
-// Only show if the entity has a script OR already has params
-                if (entity.script || !entity.scriptParams.empty()) {
-                    if (ImGui::CollapsingHeader("Script Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        auto& params = entity.scriptParams;
-                        int toDelete = -1;
-
-                        // ---- Table ----
-                        if (ImGui::BeginTable("ScriptParamTable", 3,
-                            ImGuiTableFlags_Borders |
-                            ImGuiTableFlags_RowBg |
-                            ImGuiTableFlags_SizingStretchProp))
-                        {
-                            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.4f);
-                            ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 0.5f);
-                            ImGui::TableSetupColumn("##act", ImGuiTableColumnFlags_WidthFixed, 30.0f);
-                            ImGui::TableHeadersRow();
-
-                            for (int i = 0; i < (int)params.size(); ++i) {
-                                ImGui::PushID(i);
-                                ImGui::TableNextRow();
-
-                                // ---- Name ----
-                                ImGui::TableNextColumn();
-                                char nameBuf[64];
-                                strncpy_s(nameBuf, sizeof(nameBuf), params[i].name.c_str(), _TRUNCATE);
-                                ImGui::SetNextItemWidth(-1);
-                                if (ImGui::InputText("##name", nameBuf, sizeof(nameBuf))) {
-                                    params[i].name = nameBuf;
-                                }
-
-                                // ---- Value ----
-                                ImGui::TableNextColumn();
-                                ImGui::SetNextItemWidth(-1);
-                                ImGui::DragFloat("##value", &params[i].value, 0.01f);
-
-                                // ---- Delete ----
-                                ImGui::TableNextColumn();
-                                if (ImGui::SmallButton("X")) {
-                                    toDelete = i;
-                                }
-                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete parameter");
-
-                                ImGui::PopID();
-                            }
-
-                            ImGui::EndTable();
-                        }
-
-                        // Handle deferred deletion (safe after table)
-                        if (toDelete >= 0) {
-                            pushUndo();
-                            params.erase(params.begin() + toDelete);
-                        }
-
-                        // ---- Action buttons ----
-                        if (ImGui::Button("+ Add Parameter")) {
-                            pushUndo();
-                            params.push_back({ "new_param", 0.0f });
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Clear All")) {
-                            pushUndo();
-                            params.clear();
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Reload Script")) {
-                            // Convenience: reload script after adding params
-                            if (entity.script && entity.script->isLoaded()) {
-                                std::string path = entity.script->scriptPath;
-                                entity.script->destroy();
-                                entity.script = std::make_shared<ScriptComponent>(
-                                    lua, path, selectedEntity);
-                                if (entity.script->isLoaded()) entity.script->start();
-                            }
-                        }
-
-                        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-                            "%zu parameter(s)", params.size());
-                    }
-                }
-
-                if (ImGui::Button("Delete")) {
+        
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+        
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.2f, 0.2f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.25f, 0.25f, 1.0f));
+                if (ImGui::Button("Delete Entity", ImVec2(-1, 30))) {
                     pushUndo();
                     entities.erase(entities.begin() + selectedEntity);
                     selectedEntity = -1;
                 }
-
-                // ---- Light Properties (للإضاءات فقط) ----
-                if (entity.type == EntityType::PointLight ||
-                    entity.type == EntityType::SpotLight ||
-                    entity.type == EntityType::DirectionalLight ||
-                    entity.type == EntityType::AmbientLight) {
-
-                    if (ImGui::CollapsingHeader("Light Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        auto& light = entity.light;
-                        bool lightChanged = false;
-
-                        lightChanged |= ImGui::Checkbox("Enabled", &light.enabled);
-                        lightChanged |= ImGui::ColorEdit3("Color", &light.color[0]);
-                        lightChanged |= ImGui::SliderFloat("Intensity", &light.intensity, 0.0f, 10.0f);
-
-                        // خصائص خاصة حسب نوع الإضاءة
-                        if (entity.type == EntityType::PointLight || entity.type == EntityType::SpotLight) {
-                            lightChanged |= ImGui::SliderFloat("Range", &light.range, 0.1f, 50.0f);
-                        }
-
-                        if (entity.type == EntityType::SpotLight) {
-                            lightChanged |= ImGui::SliderFloat("Inner Cone", &light.innerConeAngle, 0.0f, 45.0f);
-                            lightChanged |= ImGui::SliderFloat("Outer Cone", &light.outerConeAngle, 1.0f, 90.0f);
-                        }
-
-                        if (lightChanged && ImGui::IsItemDeactivatedAfterEdit()) {
-                            pushUndo();
-                        }
-                    }
-                }
-                else if (entity.type != EntityType::Empty &&
-                    entity.type != EntityType::Camera)  {
-                    // ---- Material Overrides ----
-                    if (ImGui::CollapsingHeader("Material Overrides", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    Material& mat = entity.material;
-                    bool matChanged = false;
-
-                    // 1. Albedo
-                    ImGui::Checkbox("Use Albedo Map", (bool*)&mat.useAlbedoMap);
-                    if (mat.useAlbedoMap) {
-                        if (ImGui::Button("Load Albedo Map##Albedo")) {
-                            std::string path = OpenFileDialog("Select Albedo Texture", "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
-                            if (!path.empty()) {
-                                pushUndo();
-                                mat.albedoMapPath = path;
-                                mat.customAlbedoID = LoadTextureFromFile(path);
-                                mat.useAlbedoMap = 1;
-                            }
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Clear##Albedo")) {
-                            pushUndo();
-                            mat.albedoMapPath = "";
-                            mat.customAlbedoID = 0;
-                            mat.useAlbedoMap = 0;
-                        }
-                        ImGui::Text("Path: %s", mat.albedoMapPath.empty() ? "(none)" : mat.albedoMapPath.c_str());
-                    }
-                    else {
-                        if (ImGui::ColorEdit3("Albedo Color", &mat.albedo[0])) matChanged = true;
-                    }
-
-                    // 2. Normal Map
-                    ImGui::Checkbox("Use Normal Map", (bool*)&mat.useNormalMap);
-                    if (mat.useNormalMap) {
-                        if (ImGui::Button("Load Normal Map##Normal")) {
-                            std::string path = OpenFileDialog("Select Normal Map", "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
-                            if (!path.empty()) {
-                                pushUndo();
-                                mat.normalMapPath = path;
-                                mat.customNormalID = LoadTextureFromFile(path);
-                                mat.useNormalMap = 1;
-                            }
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Clear##Normal")) {
-                            pushUndo();
-                            mat.normalMapPath = "";
-                            mat.customNormalID = 0;
-                            mat.useNormalMap = 0;
-                        }
-                        ImGui::Text("Path: %s", mat.normalMapPath.empty() ? "(none)" : mat.normalMapPath.c_str());
-                    }
-
-                    // 3. Metallic/Roughness
-                    ImGui::Checkbox("Use Metallic/Roughness Map", (bool*)&mat.useMetallicRoughnessMap);
-                    if (mat.useMetallicRoughnessMap) {
-                        if (ImGui::Button("Load MR Map##MR")) {
-                            std::string path = OpenFileDialog("Select Metallic/Roughness Map", "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
-                            if (!path.empty()) {
-                                pushUndo();
-                                mat.metallicRoughnessMapPath = path;
-                                mat.customMRID = LoadTextureFromFile(path);
-                                mat.useMetallicRoughnessMap = 1;
-                            }
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Clear##MR")) {
-                            pushUndo();
-                            mat.metallicRoughnessMapPath = "";
-                            mat.customMRID = 0;
-                            mat.useMetallicRoughnessMap = 0;
-                        }
-                        ImGui::Text("Path: %s", mat.metallicRoughnessMapPath.empty() ? "(none)" : mat.metallicRoughnessMapPath.c_str());
-                    }
-                    else {
-                        if (ImGui::SliderFloat("Metallic", &mat.metallic, 0.0f, 1.0f)) matChanged = true;
-                        if (ImGui::SliderFloat("Roughness", &mat.roughness, 0.0f, 1.0f)) matChanged = true;
-                    }
-
-                    // 4. AO Map
-                    ImGui::Checkbox("Use AO Map", (bool*)&mat.useAOMap);
-                    if (mat.useAOMap) {
-                        if (ImGui::Button("Load AO Map##AO")) {
-                            std::string path = OpenFileDialog("Select AO Map", "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
-                            if (!path.empty()) {
-                                pushUndo();
-                                mat.aoMapPath = path;
-                                mat.customAOID = LoadTextureFromFile(path);
-                                mat.useAOMap = 1;
-                            }
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Clear##AO")) {
-                            pushUndo();
-                            mat.aoMapPath = "";
-                            mat.customAOID = 0;
-                            mat.useAOMap = 0;
-                        }
-                        ImGui::Text("Path: %s", mat.aoMapPath.empty() ? "(none)" : mat.aoMapPath.c_str());
-                    }
-                    else {
-                        if (ImGui::SliderFloat("AO", &mat.ao, 0.0f, 1.0f)) matChanged = true;
-                    }
-
-                    // 5. Height Map
-                    ImGui::Checkbox("Use Height Map", (bool*)&mat.useHeightMap);
-                    if (mat.useHeightMap) {
-                        if (ImGui::Button("Load Height Map##Height")) {
-                            std::string path = OpenFileDialog("Select Height Map", "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
-                            if (!path.empty()) {
-                                pushUndo();
-                                mat.heightMapPath = path;
-                                mat.customHeightID = LoadTextureFromFile(path);
-                                mat.useHeightMap = 1;
-                            }
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Clear##Height")) {
-                            pushUndo();
-                            mat.heightMapPath = "";
-                            mat.customHeightID = 0;
-                            mat.useHeightMap = 0;
-                        }
-                        ImGui::Text("Path: %s", mat.heightMapPath.empty() ? "(none)" : mat.heightMapPath.c_str());
-                        if (ImGui::SliderFloat("Height Scale", &mat.heightScale, 0.0f, 0.2f)) matChanged = true;
-                    }
-
-                    // 6. Emissive Map
-                    ImGui::Checkbox("Use Emissive Map", (bool*)&mat.useEmissiveMap);
-                    if (mat.useEmissiveMap) {
-                        if (ImGui::Button("Load Emissive Map##Emissive")) {
-                            std::string path = OpenFileDialog("Select Emissive Map", "Image Files\0*.jpg;*.png;*.bmp;*.tga\0", window);
-                            if (!path.empty()) {
-                                pushUndo();
-                                mat.emissiveMapPath = path;
-                                mat.customEmissiveID = LoadTextureFromFile(path);
-                                mat.useEmissiveMap = 1;
-                            }
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Clear##Emissive")) {
-                            pushUndo();
-                            mat.emissiveMapPath = "";
-                            mat.customEmissiveID = 0;
-                            mat.useEmissiveMap = 0;
-                        }
-                        ImGui::Text("Path: %s", mat.emissiveMapPath.empty() ? "(none)" : mat.emissiveMapPath.c_str());
-                        if (ImGui::SliderFloat("Emissive Intensity", &mat.emissiveIntensity, 0.0f, 10.0f)) matChanged = true;
-                    }
-                    else {
-                        if (ImGui::ColorEdit3("Emissive Color", &mat.emissiveColor[0])) matChanged = true;
-                        if (ImGui::SliderFloat("Emissive Intensity", &mat.emissiveIntensity, 0.0f, 10.0f)) matChanged = true;
-                    }
-
-                    if (matChanged && ImGui::IsItemDeactivatedAfterEdit()) {
-                        pushUndo();
-                    }
-                }
-                }
+                ImGui::PopStyleColor(2);
             }
-
+            else {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                    "No entity selected — click one in the Outliner.");
+            }
+        
             ImGui::End();
         }
-
-        // ---- Post-Processing Window ----
+        
+        
+        // ------ Post-Processing Window ------
         if (showPostProcessingWindow) {
             ImGui::Begin("Post-Processing", &showPostProcessingWindow);
 
             if (ImGui::BeginTabBar("PostProcessingTabs")) {
                 // Color Grading
                 if (ImGui::BeginTabItem("Color Grading")) {
+                    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Tone Mapping");
+                    ImGui::Separator();
                     ImGui::SliderFloat("Saturation", &saturation, 0.0f, 2.0f);
                     ResetSliderButton("Saturation", &saturation, 1.0f);
                     ImGui::SliderFloat("Contrast", &contrast, 0.5f, 2.0f);
@@ -3396,25 +4642,57 @@ int main()
                     ResetSliderButton("Gamma", &gamma, 2.2f);
                     ImGui::SliderFloat("Exposure", &exposure, 0.0f, 3.0f);
                     ResetSliderButton("Exposure", &exposure, 1.5f);
+
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+                    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Color Grading (LUT)");
+                    ImGui::Separator();
+                    ImGui::Checkbox("Enable LUT", &lutEnabled);
+                    ImGui::SliderFloat("LUT Strength", &lutStrength, 0.0f, 1.0f);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("0 = off\n1 = full LUT");
+                    }
+
                     ImGui::EndTabItem();
                 }
+
+                // Auto Exposure
+                if (ImGui::BeginTabItem("Auto Exposure")) {
+                ImGui::Checkbox("Enable Auto Exposure", &enableAutoExposure);
+                ImGui::Separator();
+                
+                ImGui::SliderFloat("Min Exposure", &minExposure, 0.1f, 5.0f);
+                ResetSliderButton("MinExp", &minExposure, 0.3f);
+                
+                ImGui::SliderFloat("Max Exposure", &maxExposure, 0.5f, 10.0f);
+                ResetSliderButton("MaxExp", &maxExposure, 3.0f);
+                
+                ImGui::SliderFloat("Adaptation Speed", &adaptationSpeed, 0.1f, 5.0f);
+                ImGui::SliderFloat("Key Value", &keyValue, 0.05f, 0.5f);
+                
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), 
+                    "Current Exposure: %.3f", currentExposure);
+                
+                ImGui::EndTabItem();
+            }
 
                 // Bloom
                 if (ImGui::BeginTabItem("Bloom")) {
                     ImGui::Checkbox("Enable Bloom", &enableBloom);
                     ImGui::SliderFloat("Threshold", &bloomThreshold, 0.0f, 2.0f);
-                    ResetSliderButton("BloomThreshold", &bloomThreshold, 0.5f);
-                    ImGui::SliderFloat("Intensity", &bloomIntensity, 0.0f, 2.0f);
-                    ResetSliderButton("BloomIntensity", &bloomIntensity, 0.4f);
+                    ResetSliderButton("BloomThreshold", &bloomThreshold, 1.0f);
+                    ImGui::SliderFloat("Intensity ", &bloomCompositeStrength , 0.0f, 20.0f);
+                    ResetSliderButton("BloomIntensity ", &bloomCompositeStrength , 2.0f);
                     ImGui::EndTabItem();
                 }
 
-                // SSAO
-                if (ImGui::BeginTabItem("SSAO")) {
-                    ImGui::Checkbox("Enable SSAO", &enableSSAO);
-                    ImGui::TextColored(ImVec4(0.4f, 0.6f, 0.8f, 1.0f),
-                        "Radius: %.2f  |  Bias: %.3f  |  Power: %.1f",
-                        ssaoRadius, ssaoBias, ssaoPower);
+                // SSR
+                if (ImGui::BeginTabItem("SSR")) {
+                    ImGui::Checkbox("Enable SSR", &enableSSR);
+                    ImGui::SliderFloat("SSR Intensity", &ssrIntensity, 0.0f, 2.0f);
+                    ImGui::SliderFloat("SSR Max Distance", &ssrMaxDistance, 5.0f, 100.0f);
+                    ImGui::SliderFloat("SSR Thickness", &ssrThickness, 0.1f, 2.0f);
                     ImGui::EndTabItem();
                 }
 
@@ -3438,6 +4716,23 @@ int main()
                 // Shadows (Contact Shadows)
                 if (ImGui::BeginTabItem("Shadows")) {
                     ImGui::Checkbox("Contact Shadows", &enableContactShadows);
+                
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Cascaded Shadow Maps");
+                    ImGui::Checkbox("Enable CSM", &csm.mEnabled);
+                
+                    ImGui::SliderFloat("Cascade Lambda", &csm.mCascadeLambda, 0.0f, 1.0f);
+
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("0 = uniform, 1 = logarithmic");
+                    ImGui::Text("Cascades: %d @ %dx%d",
+                                CSM::NUM_CASCADES, CSM::SHADOW_SIZE, CSM::SHADOW_SIZE);
+                
+                    ImGui::Text("Splits:");
+                    for (int i = 0; i < CSM::NUM_CASCADES; ++i) {
+                        ImGui::Text("  %d: %.1f", i, csm.GetSplitDepths()[i]);
+                    }
+                
                     ImGui::EndTabItem();
                 }
 
@@ -3447,11 +4742,58 @@ int main()
                     ImGui::EndTabItem();
                 }
 
+                // SSS
+                if (ImGui::BeginTabItem("SSS")) {
+                    ImGui::Checkbox("Enable SSS", &enableSSS);
+
+                    ImGui::SliderFloat("Intensity", &sssIntensity, 0.0f, 3.0f);
+                    ImGui::SliderFloat("Width", &sssWidth, 0.0f, 1.0f);
+                    ImGui::ColorEdit3("SSS Color", &sssColor[0]);
+
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                        "Tip: Red tones work best for skin");
+                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                        "Width: how far light wraps around");
+
+                    ImGui::EndTabItem();
+                }
+
+                // Post FX
+                if (ImGui::BeginTabItem("Post FX")) {
+                    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Sharpening");
+                    ImGui::Separator();
+                    ImGui::Checkbox("Enable Sharpening", &enableSharpening);
+                    ImGui::SliderFloat("Strength", &sharpeningStrength, 0.0f, 2.0f);
+                    ImGui::Spacing();
+
+                    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Chromatic Aberration");
+                    ImGui::Separator();
+                    ImGui::Checkbox("Enable CA", &enableChromaticAberration);
+                    ImGui::SliderFloat("CA Strength", &chromaticStrength, 0.0f, 0.02f);
+                    ImGui::Spacing();
+
+                    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Vignette");
+                    ImGui::Separator();
+                    ImGui::Checkbox("Enable Vignette", &enableVignette);
+                    ImGui::SliderFloat("Vignette Strength", &vignetteStrength, 0.0f, 1.5f);
+                    ImGui::SliderFloat("Vignette Radius", &vignetteRadius, 0.5f, 1.5f);
+                    ImGui::Spacing();
+
+                    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Film Grain");
+                    ImGui::Separator();
+                    ImGui::Checkbox("Enable Film Grain", &enableFilmGrain);
+                    ImGui::SliderFloat("Grain Strength", &grainStrength, 0.0f, 0.2f);
+
+                    ImGui::EndTabItem();
+                }
+
                 ImGui::EndTabBar();
             }
             ImGui::End();
         }
 
+        
         // ---- Content Browser ----
         if (showContentBrowser) {
             ImGui::Begin("Content Browser", &showContentBrowser, ImGuiWindowFlags_NoCollapse);
@@ -3560,7 +4902,7 @@ int main()
                                 std::string ext = fs::path(normalizedPath).extension().string();
                                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                                 if (ext == ".fbx" || ext == ".FBX") {
-                                    newModel = FBXLoader::Load(normalizedPath);
+                                    //newModel = FBXLoader::Load(normalizedPath);
                                     if (newModel) {
                                         std::cout << "[Import] FBX loaded via FBXLoader" << std::endl;
                                     }
@@ -3575,6 +4917,9 @@ int main()
                                     modelPaths.push_back(normalizedPath);
                                     modelToUse = newModel;
                                     std::cout << "[Import] Model loaded successfully: " << normalizedPath << std::endl;
+                                    std::cout << "[Entity " << entities.size() - 1 << "] " 
+                                    << modelToUse->file << " radius = " 
+                                    << entities.back().boundingRadius << std::endl;
                                 }
                                 else {
                                     std::cout << "[Import] Model has no meshes (corrupted?): " << normalizedPath << std::endl;
@@ -3604,8 +4949,6 @@ int main()
                         defaultMat.useHeightMap = 0;
                         defaultMat.useEmissiveMap = 0;
                         defaultMat.emissiveIntensity = 1.0f;
-
-
 
                         if (modelToUse && !modelToUse->meshes.empty()) {
                             for (const auto& mesh : modelToUse->meshes) {
@@ -3704,7 +5047,59 @@ int main()
                             false,
                             false
                             });
+
+                        if (modelToUse) {
+                            entities.back().boundingRadius = modelToUse->GetBoundingRadius();
+                        }
+                            
                         std::cout << "[Import] Added new entity with model: " << normalizedPath << std::endl;
+                        
+                        // ============================================================
+                        //            Populate material slots from mesh
+                        // ============================================================
+                        entities.back().materialSlots.clear();
+                        entities.back().selectedMaterialSlot = -1;
+                        
+                        for (size_t mi = 0; mi < modelToUse->meshes.size(); ++mi) {
+                            const Mesh& m = modelToUse->meshes[mi];
+                        
+                            MaterialSlot slot;
+                            slot.meshIndex = (int)mi;
+                            slot.name      = "Material " + std::to_string(mi);
+                        
+                            slot.material.baseColorFactor   = m.baseColorFactor;
+                            slot.material.albedo            = glm::vec3(m.baseColorFactor);
+                            slot.material.metallic          = m.metallicFactor;
+                            slot.material.roughness         = m.roughnessFactor;
+                            slot.material.emissiveFactor    = m.emissiveFactor;
+                            slot.material.emissiveColor     = m.emissiveFactor;
+                            slot.material.emissiveStrength  = m.emissiveStrength;
+                            slot.material.emissiveIntensity = m.emissiveStrength;
+                        
+                            slot.material.hasBaseColorTexture = m.hasBaseColorTexture;
+                            slot.material.hasMRTexture        = m.hasMRTexture;
+                            slot.material.hasNormalTexture    = m.hasNormalTexture;
+                            slot.material.hasEmissiveTexture  = m.hasEmissiveTexture;
+                            slot.material.hasAOTexture        = m.hasAOTexture;
+                        
+                            slot.material.useAlbedoMap            = m.hasBaseColorTexture ? 1 : 0;
+                            slot.material.useMetallicRoughnessMap = m.hasMRTexture        ? 1 : 0;
+                            slot.material.useNormalMap            = m.hasNormalTexture    ? 1 : 0;
+                            slot.material.useEmissiveMap          = m.hasEmissiveTexture  ? 1 : 0;
+                            slot.material.useAOMap                = m.hasAOTexture        ? 1 : 0;
+                        
+                            entities.back().materialSlots.push_back(slot);
+                        }
+                        
+                        if (!entities.back().materialSlots.empty()) {
+                            entities.back().selectedMaterialSlot = 0;
+                            entities.back().material = entities.back().materialSlots[0].material;
+                        }
+                        
+                        RebuildMaterialSlots(entities.back(), false);
+                        std::cout << "[Import] Created " << entities.back().materialSlots.size()
+                                  << " material slot(s)" << std::endl;
+                        
                         selectedModelPath = "";
                     }
                     else {
@@ -3746,6 +5141,7 @@ int main()
                 }
             }
 
+            ImGui::SliderFloat("Ambient Intensity", &ambientIntensity, 0.0f, 2.0f);
 
             // ===== انعكاسات البيئة =====
             ImGui::Checkbox("Enable Reflections", &enableEnvReflections);
@@ -3783,44 +5179,237 @@ int main()
             ImGui::Begin("Performance Monitor", &showPerformanceWindow, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
             ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "FPS: %.1f", fps);
             ImGui::Text("Frame Time: %.2f ms", deltaTime * 1000.0f);
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(1, 1, 0, 1), "Engine State");
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(1, 0.6, 0.3, 1), "Async Loader");
+            ImGui::Text("Active tasks: %zu", AsyncLoader::Get().PendingCount());
+            ImGui::Text("Pending callbacks: %zu", AsyncLoader::Get().QueueSize());
+            ImGui::Separator();
             ImGui::Text("Entities: %zu", entities.size());
+            ImGui::Text("Lights (active): %d", (int)gpuLights.size());
+            ImGui::Text("Bloom: %s", enableBloom ? "ON" : "OFF");
+            ImGui::Text("Auto Exposure: %s", enableAutoExposure ? "ON" : "OFF");
+            ImGui::Text("Fog: %s", enableVolumetricFog ? "ON" : "OFF");
+            ImGui::Text("SSR: %s", enableSSR ? "ON" : "OFF");
+            ImGui::Text("FXAA: %s", enableFXAA ? "ON" : "OFF");
+            ImGui::Text("Debug View: %s", debugViewNames[debugView]);
+            ImGui::Text("gameMode: %s", gameMode ? "PLAY" : "EDIT");
             ImGui::End();
         }
 
-        // ---- Shadow Map Pass ----
-        glm::vec3 lightPosWorld = -lightDir * 20.0f;
-        glm::mat4 lightProjection = glm::ortho(-10.0f, 10.0f, -10.0f, 10.0f, 0.1f, 30.0f);
-        glm::mat4 lightView = glm::lookAt(lightPosWorld, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        glm::mat4 lightSpaceMatrix = lightProjection * lightView;
+        // ============================================================
+        //              LIGHT GIZMOS 
+        // ============================================================
+        gizmoLines.clear();
 
-        glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
-        glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
-        glClear(GL_DEPTH_BUFFER_BIT);
+        if (showLightGizmos) {
+            const int SEGMENTS = 32;
+            const float TWO_PI = 6.2831853f;
 
-        depthShader.Activate();
-        glUniformMatrix4fv(glGetUniformLocation(depthShader.ID, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+            for (const auto& entity : entities) {
+                // Only for lights
+                bool isLight = (entity.type == EntityType::PointLight ||
+                    entity.type == EntityType::SpotLight ||
+                    entity.type == EntityType::DirectionalLight);
+                if (!isLight) continue;
+                if (!entity.light.enabled) continue;
 
-        for (auto& entity : entities) {
-            if (entity.type == EntityType::PointLight ||
-                entity.type == EntityType::SpotLight ||
-                entity.type == EntityType::DirectionalLight ||
-                entity.type == EntityType::AmbientLight) {
-                continue;
+                glm::vec3 pos = entity.position;
+                glm::vec3 color = entity.light.color;
+
+                // ============ POINT LIGHT — 3 circles ============
+                if (entity.type == EntityType::PointLight) {
+                    float r = entity.light.range;
+
+                    // XY plane
+                    for (int i = 0; i < SEGMENTS; i++) {
+                        float a1 = (i / (float)SEGMENTS) * TWO_PI;
+                        float a2 = ((i + 1) / (float)SEGMENTS) * TWO_PI;
+                        glm::vec3 p1 = pos + r * glm::vec3(cos(a1), sin(a1), 0.0f);
+                        glm::vec3 p2 = pos + r * glm::vec3(cos(a2), sin(a2), 0.0f);
+                        gizmoLines.push_back({ p1, p2, color, 0.0f });
+                    }
+
+                    // XZ plane
+                    for (int i = 0; i < SEGMENTS; i++) {
+                        float a1 = (i / (float)SEGMENTS) * TWO_PI;
+                        float a2 = ((i + 1) / (float)SEGMENTS) * TWO_PI;
+                        glm::vec3 p1 = pos + r * glm::vec3(cos(a1), 0.0f, sin(a1));
+                        glm::vec3 p2 = pos + r * glm::vec3(cos(a2), 0.0f, sin(a2));
+                        gizmoLines.push_back({ p1, p2, color, 0.0f });
+                    }
+
+                    // YZ plane
+                    for (int i = 0; i < SEGMENTS; i++) {
+                        float a1 = (i / (float)SEGMENTS) * TWO_PI;
+                        float a2 = ((i + 1) / (float)SEGMENTS) * TWO_PI;
+                        glm::vec3 p1 = pos + r * glm::vec3(0.0f, cos(a1), sin(a1));
+                        glm::vec3 p2 = pos + r * glm::vec3(0.0f, cos(a2), sin(a2));
+                        gizmoLines.push_back({ p1, p2, color, 0.0f });
+                    }
+                }
+
+                // ============ SPOT LIGHT — cone ============
+                else if (entity.type == EntityType::SpotLight) {
+                    float r = entity.light.range;
+                    float outerAngle = glm::radians(entity.light.outerConeAngle);
+
+                    // Direction
+                    glm::mat4 rotMat = glm::mat4(1.0f);
+                    rotMat = glm::rotate(rotMat, glm::radians(entity.rotation.x), glm::vec3(1, 0, 0));
+                    rotMat = glm::rotate(rotMat, glm::radians(entity.rotation.y), glm::vec3(0, 1, 0));
+                    rotMat = glm::rotate(rotMat, glm::radians(entity.rotation.z), glm::vec3(0, 0, 1));
+                    glm::vec3 dir = -glm::vec3(rotMat[2]);
+                    dir = glm::normalize(dir);
+
+                    // Orthogonal frame
+                    glm::vec3 up = (glm::abs(dir.y) > 0.99f) ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+                    glm::vec3 right = glm::normalize(glm::cross(dir, up));
+                    up = glm::cross(right, dir);
+
+                    float coneRadius = r * std::tan(outerAngle);
+                    glm::vec3 apex = pos;
+                    glm::vec3 baseCenter = pos + dir * r;
+
+                    // Base circle
+                    for (int i = 0; i < SEGMENTS; i++) {
+                        float a1 = (i / (float)SEGMENTS) * TWO_PI;
+                        float a2 = ((i + 1) / (float)SEGMENTS) * TWO_PI;
+                        glm::vec3 p1 = baseCenter + coneRadius * (cos(a1) * right + sin(a1) * up);
+                        glm::vec3 p2 = baseCenter + coneRadius * (cos(a2) * right + sin(a2) * up);
+                        gizmoLines.push_back({ p1, p2, color, 0.0f });
+                    }
+
+                    // 4 lines from apex to base
+                    for (int i = 0; i < 4; i++) {
+                        float a = (i / 4.0f) * TWO_PI;
+                        glm::vec3 p = baseCenter + coneRadius * (cos(a) * right + sin(a) * up);
+                        gizmoLines.push_back({ apex, p, color, 0.0f });
+                    }
+                }
+
+                // ============ DIRECTIONAL LIGHT — arrow ============
+                else if (entity.type == EntityType::DirectionalLight) {
+                    glm::mat4 rotMat = glm::mat4(1.0f);
+                    rotMat = glm::rotate(rotMat, glm::radians(entity.rotation.x), glm::vec3(1, 0, 0));
+                    rotMat = glm::rotate(rotMat, glm::radians(entity.rotation.y), glm::vec3(0, 1, 0));
+                    rotMat = glm::rotate(rotMat, glm::radians(entity.rotation.z), glm::vec3(0, 0, 1));
+                    glm::vec3 dir = -glm::vec3(rotMat[2]);
+                    dir = glm::normalize(dir);
+
+                    float arrowLength = 5.0f;
+                    glm::vec3 end = pos + dir * arrowLength;
+                    gizmoLines.push_back({ pos, end, color, 0.0f });
+
+                    // Arrow head
+                    glm::vec3 up = (glm::abs(dir.y) > 0.99f) ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+                    glm::vec3 right = glm::normalize(glm::cross(dir, up));
+                    up = glm::cross(right, dir);
+
+                    float headSize = 0.5f;
+                    glm::vec3 headBase = end - dir * headSize;
+                    for (int i = 0; i < 4; i++) {
+                        float a = (i / 4.0f) * TWO_PI;
+                        glm::vec3 offset = headSize * 0.5f * (cos(a) * right + sin(a) * up);
+                        glm::vec3 p = headBase + offset;
+                        gizmoLines.push_back({ end, p, color, 0.0f });
+                    }
+                }
+            }
+        }
+
+        // Find first directional light
+        glm::vec3 activeLightDir = lightDir;
+        int directionalLightIndex = -1;
+        for (int i = 0; i < (int)entities.size(); ++i) {
+            const auto& e = entities[i];
+            if (e.type == EntityType::DirectionalLight && e.light.enabled) {
+                glm::mat4 rotMat = glm::mat4(1.0f);
+                rotMat = glm::rotate(rotMat, glm::radians(e.rotation.x), glm::vec3(1,0,0));
+                rotMat = glm::rotate(rotMat, glm::radians(e.rotation.y), glm::vec3(0,1,0));
+                rotMat = glm::rotate(rotMat, glm::radians(e.rotation.z), glm::vec3(0,0,1));
+                activeLightDir = glm::normalize(-glm::vec3(rotMat[2]));
+                directionalLightIndex = i;
+                break;
+            }
+        }
+
+        // ---- CSM Shadow Pass ----
+        glm::vec3 lightDirN = glm::normalize(-lightDir);
+        csm.Update(viewMatrix, proj, editorFOV, (float)width/height,
+           0.1f, 1000.0f, activeLightDir);
+
+        
+
+           if (csm.mEnabled) {
+                glEnable(GL_DEPTH_TEST);
+                glDepthFunc(GL_LESS);
+                glCullFace(GL_FRONT);   // render backfaces to reduce peter-panning
+            
+                csmShader.Activate();
+            
+                // ---- Cache uniform locations ONCE per shader ----
+                static GLint uLightMatrix  = glGetUniformLocation(csmShader.ID, "lightMatrix");
+                static GLint uLightDir     = glGetUniformLocation(csmShader.ID, "lightDir");
+                static GLint uModel        = glGetUniformLocation(csmShader.ID, "model");
+                static GLint uNormalMat    = glGetUniformLocation(csmShader.ID, "normalMatrix");
+            
+                // ---- Set lightDir once (used by normal offset in vertex shader) ----
+                glUniform3fv(uLightDir, 1, glm::value_ptr(activeLightDir));
+            
+                for (int c = 0; c < CSM::NUM_CASCADES; ++c) {
+                    csm.BindForWriting(c);
+            
+                    glm::mat4 lightMat = csm.GetLightMatrices()[c];
+                    Frustum lightFrustum = extractFrustum(lightMat);
+            
+                    glUniformMatrix4fv(uLightMatrix, 1, GL_FALSE, glm::value_ptr(lightMat));
+            
+                    for (auto& entity : entities) {
+                        // Skip lights
+                        if (entity.type == EntityType::PointLight   ||
+                            entity.type == EntityType::SpotLight    ||
+                            entity.type == EntityType::DirectionalLight ||
+                            entity.type == EntityType::AmbientLight) continue;
+            
+                        if (!entity.model) continue;
+                        if (entity.model->meshes.empty()) continue;
+            
+                        // ---- Frustum culling (padded for skinned) ----
+                        float cullRadius = entity.boundingRadius * (1.5f);
+                        if (enableFrustumCulling &&
+                            !isSphereInFrustum(lightFrustum, entity.position, cullRadius))
+                            continue;
+            
+                        // ---- World matrix ----
+                        glm::mat4 modelMat = glm::mat4(1.0f);
+                        modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.x), glm::vec3(1,0,0));
+                        modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.y), glm::vec3(0,1,0));
+                        modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.z), glm::vec3(0,0,1));
+                        modelMat = glm::translate(modelMat, entity.position);
+                        modelMat = glm::scale(modelMat, entity.scale);
+            
+                        // ---- DrawDepth handles per-mesh bone upload internally ----
+                        entity.model->DrawDepth(csmShader, modelMat);
+                    }
+                }
+            
+                glCullFace(GL_BACK);
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glViewport(0, 0, width, height);
             }
 
-            if (entity.model == nullptr) continue;
-            if (enableFrustumCulling) {
-                float radius = 1.0f;
-                if (!isSphereInFrustum(frustum, entity.position, radius)) continue;
-            }
-            glm::mat4 modelMat = glm::mat4(1.0f);
-            modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.x), glm::vec3(1, 0, 0));
-            modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.y), glm::vec3(0, 1, 0));
-            modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.z), glm::vec3(0, 0, 1));
-            modelMat = glm::translate(modelMat, entity.position);
-            modelMat = glm::scale(modelMat, entity.scale);
-            glUniformMatrix4fv(glGetUniformLocation(depthShader.ID, "model"), 1, GL_FALSE, glm::value_ptr(modelMat));
-            entity.model->DrawDepth(depthShader, modelMat);
+        glm::mat4 lightSpaceMatrix;
+        if (csm.mEnabled) {
+            lightSpaceMatrix = csm.GetLightMatrices()[0];   // استخدم أول cascade للـ shader القديم
+            //std::cout << "[CSM] draws this frame: " << csmDraws << std::endl;
+        } else {
+            // fallback قديم
+            glm::vec3 lightPosWorld = -glm::normalize(-lightDir) * 20.0f;
+            glm::mat4 lightProjection = glm::ortho(-10.0f, 10.0f, -10.0f, 10.0f, 0.1f, 30.0f);
+            glm::mat4 lightView = glm::lookAt(lightPosWorld, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+            lightSpaceMatrix = lightProjection * lightView;
         }
 
         // ---- G-Buffer Pass ----
@@ -3830,120 +5419,227 @@ int main()
 
         gBufferShader.Activate();
         glUniformMatrix4fv(glGetUniformLocation(gBufferShader.ID, "camMatrix"), 1, GL_FALSE, glm::value_ptr(cameraMatrix));
-        glUniform3f(glGetUniformLocation(gBufferShader.ID, "camPos"), camera.Position.x, camera.Position.y, camera.Position.z);
+        glUniform3f(gbufLoc.camPos, camera.Position.x, camera.Position.y, camera.Position.z);
         glUniform1i(glGetUniformLocation(gBufferShader.ID, "useNormalMap"), 1);
         glUniform1i(glGetUniformLocation(gBufferShader.ID, "useMetallicRoughness"), 1);
         glUniform1i(glGetUniformLocation(gBufferShader.ID, "useHeightMap"), 1);
 
         for (auto& entity : entities) {
+            // ---- Skip lights ----
             if (entity.type == EntityType::PointLight ||
                 entity.type == EntityType::SpotLight ||
                 entity.type == EntityType::DirectionalLight ||
                 entity.type == EntityType::AmbientLight) {
                 continue;
             }
-
+        
+            // ---- Frustum culling ----
             if (enableFrustumCulling) {
-                float radius = 1.0f;
-                if (!isSphereInFrustum(frustum, entity.position, radius)) continue;
+                if (!isSphereInFrustum(frustum, entity.position, entity.boundingRadius))
+                    continue;
             }
-
-            glUniform3f(uAlbedoLoc, entity.material.albedo.x, entity.material.albedo.y, entity.material.albedo.z);
-            glUniform1f(uMetallicLoc, entity.material.metallic);
-            glUniform1f(uRoughnessLoc, entity.material.roughness);
-            glUniform1f(uAOLoc, entity.material.ao);
-
-            GLuint albedoTexID = whiteTexture;
-            bool useAlbedo = false;
-            if (entity.material.useAlbedoMap && entity.material.customAlbedoID != 0) {
-                albedoTexID = entity.material.customAlbedoID;
-                useAlbedo = true;
-            }
-            else if (entity.model && !entity.model->meshes.empty()) {
-                for (const auto& mesh : entity.model->meshes) {
-                    for (const auto& tex : mesh.textures) {
-                        if (tex.type == "diffuse" && tex.ID != 0) {
-                            albedoTexID = tex.ID;
-                            useAlbedo = true;
-                            break;
-                        }
-                    }
-                    if (useAlbedo) break;
-                }
-            }
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, albedoTexID);
-            glUniform1i(uUseAlbedoMapLoc, useAlbedo ? 1 : 0);
-
-            bool useNormal = (entity.material.useNormalMap && entity.material.customNormalID != 0);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, useNormal ? entity.material.customNormalID : whiteTexture);
-            glUniform1i(uUseNormalMapLoc, useNormal ? 1 : 0);
-
-            bool useMR = (entity.material.useMetallicRoughnessMap && entity.material.customMRID != 0);
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, useMR ? entity.material.customMRID : whiteTexture);
-            glUniform1i(uUseMetallicRoughnessMapLoc, useMR ? 1 : 0);
-
-            glUniform1i(uUseAOMapLoc, 0);
-
-            bool useHeight = (entity.material.useHeightMap && entity.material.customHeightID != 0);
-            glActiveTexture(GL_TEXTURE3);
-            glBindTexture(GL_TEXTURE_2D, useHeight ? entity.material.customHeightID : whiteTexture);
-            glUniform1i(uUseHeightMapLoc, useHeight ? 1 : 0);
-            glUniform1f(uHeightScaleLoc, entity.material.heightScale);
-
-            bool useEmissive = (entity.material.useEmissiveMap && entity.material.customEmissiveID != 0);
-            glActiveTexture(GL_TEXTURE5);
-            glBindTexture(GL_TEXTURE_2D, useEmissive ? entity.material.customEmissiveID : whiteTexture);
-            glUniform1i(glGetUniformLocation(gBufferShader.ID, "emissiveMap0"), 5);
-            glUniform1i(glGetUniformLocation(gBufferShader.ID, "uUseEmissiveMap"), useEmissive ? 1 : 0);
-            glUniform3f(uEmissiveColorLoc, entity.material.emissiveColor.x, entity.material.emissiveColor.y, entity.material.emissiveColor.z);
-            glUniform1f(uEmissiveIntensityLoc, entity.material.emissiveIntensity);
-
+        
+            // ---- Build entity world matrix ----
             glm::mat4 modelMat = glm::mat4(1.0f);
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.x), glm::vec3(1, 0, 0));
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.y), glm::vec3(0, 1, 0));
             modelMat = glm::rotate(modelMat, glm::radians(entity.rotation.z), glm::vec3(0, 0, 1));
             modelMat = glm::translate(modelMat, entity.position);
             modelMat = glm::scale(modelMat, entity.scale);
+        
+            // ============================================================
+            //  CASE A — Multi-material path (entity has material slots)
+            // ============================================================
+            if (entity.model && !entity.materialSlots.empty())
+            {
+                size_t count = std::min(entity.model->meshes.size(),
+                                        entity.materialSlots.size());
+        
+                for (size_t mi = 0; mi < count; ++mi)
+                {
+                    Mesh&     mesh = entity.model->meshes[mi];
+                    Material& mat  = entity.materialSlots[mi].material;
+        
+                    // ---------- Scalar uniforms ----------
+                    glUniform3f(gbufLoc.uAlbedo, mat.albedo.x, mat.albedo.y, mat.albedo.z);
+                    glUniform1f(gbufLoc.uMetallic, mat.metallic);
+                    glUniform1f(gbufLoc.uRoughness, mat.roughness);
+                    glUniform1f(gbufLoc.uAO, mat.ao);
+        
+                    // ---------- Albedo / Base color ----------
+                    GLuint albedoTexID = whiteTexture;
+                    bool   useAlbedo   = false;
+        
+                    if (mat.useAlbedoMap && mat.customAlbedoID != 0) {
+                        albedoTexID = mat.customAlbedoID;
+                        useAlbedo   = true;
+                    }
+                    else {
+                        // Fallback: check mesh's own textures
+                        for (const auto& tex : mesh.textures) {
+                            if (tex.type == "diffuse" && tex.ID != 0) {
+                                albedoTexID = tex.ID;
+                                useAlbedo   = true;
+                                break;
+                            }
+                        }
+                    }
+        
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, albedoTexID);
+                    glUniform1i(gbufLoc.uUseAlbedoMap, useAlbedo ? 1 : 0);
+        
+                    // ---------- Normal ----------
+                    bool useNormal = (mat.useNormalMap && mat.customNormalID != 0);
+                    glActiveTexture(GL_TEXTURE1);
+                    glBindTexture(GL_TEXTURE_2D, useNormal ? mat.customNormalID : whiteTexture);
+                    glUniform1i(gbufLoc.uUseNormalMap, useNormal ? 1 : 0);
+        
+                    // ---------- Metallic / Roughness ----------
+                    bool useMR = (mat.useMetallicRoughnessMap && mat.customMRID != 0);
+                    glActiveTexture(GL_TEXTURE2);
+                    glBindTexture(GL_TEXTURE_2D, useMR ? mat.customMRID : whiteTexture);
+                    glUniform1i(gbufLoc.uUseMetallicRoughnessMap, useMR ? 1 : 0);
+        
+                    // ---------- AO ----------
+                    glUniform1i(gbufLoc.uUseAOMap, 0);
+        
+                    // ---------- Height ----------
+                    bool useHeight = (mat.useHeightMap && mat.customHeightID != 0);
+                    glActiveTexture(GL_TEXTURE3);
+                    glBindTexture(GL_TEXTURE_2D, useHeight ? mat.customHeightID : whiteTexture);
+                    glUniform1i(gbufLoc.useHeightMap, useHeight ? 1 : 0);
+                    glUniform1f(gbufLoc.heightScale, mat.heightScale);
+        
+                    // ---------- Emissive ----------
+                    bool useEmissive = (mat.useEmissiveMap && mat.customEmissiveID != 0);
+                    glActiveTexture(GL_TEXTURE5);
+                    glBindTexture(GL_TEXTURE_2D,
+                        useEmissive ? mat.customEmissiveID : whiteTexture);
 
-            entity.model->Draw(gBufferShader, camera, modelMat, /*bindTextures=*/false);
+                    glUniform1i(gbufLoc.emissiveMap0, 5);
+                    glUniform1i(gbufLoc.uUseEmissiveMap, useEmissive ? 1 : 0);
+                    glUniform3f(gbufLoc.uEmissiveColor, mat.emissiveColor.x, mat.emissiveColor.y, mat.emissiveColor.z);
+                    glUniform1f(gbufLoc.uEmissiveIntensity, mat.emissiveIntensity);
+        
+                    // ---------- SSS ----------
+                    glUniform1f(gbufLoc.uSSSMask, mat.sssEnabled ? mat.sssMask : 0.0f);
+        
+                    // ---------- Per-mesh transform ----------
+                    glm::mat4 finalMatrix = modelMat;
+                    if (mi < entity.model->matricesMeshes.size())
+                        finalMatrix = modelMat * entity.model->matricesMeshes[mi];
+
+                    static int debugCounter = 0;
+                    if (debugCounter++ < 3) {
+                        std::cout << "[DRAW] slot=" << mi
+                                << " mat.customAlbedoID=" << mat.customAlbedoID
+                                << " mat.useAlbedoMap=" << mat.useAlbedoMap
+                                << " mesh.hasBaseColorTexture=" << mesh.hasBaseColorTexture
+                                << " mesh.textures.size()=" << mesh.textures.size();
+
+                        for (const auto& tex : mesh.textures) {
+                            std::cout << " [" << tex.type << "=" << tex.ID << "]";
+                        }
+                        std::cout << std::endl;
+                    }
+        
+                    // ---------- Draw this single mesh ----------
+                    mesh.Draw(gBufferShader,
+                              camera,
+                              finalMatrix,
+                              glm::vec3(0.0f),
+                              glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+                              glm::vec3(1.0f),
+                              /*false*/true);   // textures already bound above; don't re-bind
+                }
+            }
+            // ============================================================
+            //  CASE B — Fallback: single material for the whole model
+            // ============================================================
+            else if (entity.model)
+            {
+                Material& mat = entity.material;
+        
+                // ---------- Scalar uniforms ----------
+                glUniform3f(gbufLoc.uAlbedo, mat.albedo.x, mat.albedo.y, mat.albedo.z);
+                glUniform1f(gbufLoc.uMetallic, mat.metallic);
+                glUniform1f(gbufLoc.uRoughness, mat.roughness);
+                glUniform1f(gbufLoc.uAO, mat.ao);
+        
+                // ---------- Albedo ----------
+                GLuint albedoTexID = whiteTexture;
+                bool   useAlbedo   = false;
+        
+                if (mat.useAlbedoMap && mat.customAlbedoID != 0) {
+                    albedoTexID = mat.customAlbedoID;
+                    useAlbedo   = true;
+                }
+                else if (!entity.model->meshes.empty()) {
+                    for (const auto& mesh : entity.model->meshes) {
+                        for (const auto& tex : mesh.textures) {
+                            if (tex.type == "diffuse" && tex.ID != 0) {
+                                albedoTexID = tex.ID;
+                                useAlbedo   = true;
+                                break;
+                            }
+                        }
+                        if (useAlbedo) break;
+                    }
+                }
+        
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, albedoTexID);
+                glUniform1i(gbufLoc.uUseAlbedoMap, useAlbedo ? 1 : 0);
+        
+                // ---------- Normal ----------
+                bool useNormal = (mat.useNormalMap && mat.customNormalID != 0);
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, useNormal ? mat.customNormalID : whiteTexture);
+                glUniform1i(gbufLoc.uUseNormalMap, useNormal ? 1 : 0);
+        
+                // ---------- MR ----------
+                bool useMR = (mat.useMetallicRoughnessMap && mat.customMRID != 0);
+                glActiveTexture(GL_TEXTURE2);
+                glBindTexture(GL_TEXTURE_2D, useMR ? mat.customMRID : whiteTexture);
+                glUniform1i(gbufLoc.uUseMetallicRoughnessMap, useMR ? 1 : 0);
+        
+                // ---------- AO ----------
+                glUniform1i(gbufLoc.uUseAOMap, 0);
+        
+                // ---------- Height ----------
+                bool useHeight = (mat.useHeightMap && mat.customHeightID != 0);
+                glActiveTexture(GL_TEXTURE3);
+                glBindTexture(GL_TEXTURE_2D, useHeight ? mat.customHeightID : whiteTexture);
+                glUniform1i(gbufLoc.useHeightMap, useHeight ? 1 : 0);
+                glUniform1f(gbufLoc.heightScale, mat.heightScale);
+        
+                // ---------- Emissive ----------
+                bool useEmissive = (mat.useEmissiveMap && mat.customEmissiveID != 0);
+                glActiveTexture(GL_TEXTURE5);
+                glBindTexture(GL_TEXTURE_2D, useEmissive ? mat.customEmissiveID : whiteTexture);
+                glUniform1i(gbufLoc.emissiveMap0, 5);
+                glUniform1i(gbufLoc.uUseEmissiveMap, useEmissive ? 1 : 0);
+                glUniform3f(gbufLoc.uEmissiveColor, mat.emissiveColor.x, mat.emissiveColor.y, mat.emissiveColor.z);
+                glUniform1f(gbufLoc.uEmissiveIntensity, mat.emissiveIntensity);
+        
+                // ---------- SSS ----------
+                glUniform1f(gbufLoc.uSSSMask, mat.sssEnabled ? mat.sssMask : 0.0f);
+                
+                // ---------- Draw whole model ----------
+                entity.model->Draw(gBufferShader, camera, modelMat, false);
+            }
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-        // ---- SSAO Pass ----
-        if (enableSSAO) {
-            glBindFramebuffer(GL_FRAMEBUFFER, ssaoFBO);
-            glClear(GL_COLOR_BUFFER_BIT);
+        glActiveTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_2D, whiteTexture);
+        glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "ssao"), 4);
 
-            ssaoShader.Activate();
-            glUniform1f(glGetUniformLocation(ssaoShader.ID, "radius"), ssaoRadius);
-            glUniform1f(glGetUniformLocation(ssaoShader.ID, "bias"), ssaoBias);
-
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gPosition);
-            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gNormal);
-            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, noiseTexture);
-
-            glUniform1i(glGetUniformLocation(ssaoShader.ID, "gPosition"), 0);
-            glUniform1i(glGetUniformLocation(ssaoShader.ID, "gNormal"), 1);
-            glUniform1i(glGetUniformLocation(ssaoShader.ID, "noiseTexture"), 2);
-
-            glm::mat4 proj = glm::perspective(glm::radians(editorFOV), (float)width / height, 0.1f, 1000.0f);
-            glUniformMatrix4fv(glGetUniformLocation(ssaoShader.ID, "projection"), 1, GL_FALSE, glm::value_ptr(proj));
-            glUniform2f(glGetUniformLocation(ssaoShader.ID, "noiseScale"), (float)width / 4.0f, (float)height / 4.0f);
-
-            for (unsigned int i = 0; i < ssaoSamples.size(); i++) {
-                std::string name = "samples[" + std::to_string(i) + "]";
-                glUniform3fv(glGetUniformLocation(ssaoShader.ID, name.c_str()), 1, glm::value_ptr(ssaoSamples[i]));
-            }
-
-            glDisable(GL_DEPTH_TEST);
-            glBindVertexArray(rectVAO);
-            glDrawArrays(GL_TRIANGLES, 0, 6);
-            glEnable(GL_DEPTH_TEST);
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        }
+        // ---- SSS Uniforms ----
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "sssIntensity"), enableSSS ? sssIntensity : 0.0f);
+        glUniform3f(glGetUniformLocation(deferredLightingShader.ID, "sssColor"), sssColor.r, sssColor.g, sssColor.b);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "sssWidth"), sssWidth);
 
         // ---- Lighting Pass ----
 
@@ -3953,7 +5649,7 @@ int main()
             if (entity.type == EntityType::PointLight ||
                 entity.type == EntityType::SpotLight ||
                 entity.type == EntityType::DirectionalLight ||
-                entity.type == EntityType::AmbientLight)   // ← جديد
+                entity.type == EntityType::AmbientLight)   
             {
                 if (!entity.light.enabled) continue;
 
@@ -3992,6 +5688,11 @@ int main()
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         deferredLightingShader.Activate();
+
+        glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "useCSM"),
+            csm.mEnabled ? 1 : 0);
+
+        glUniform1f(uAmbientIntensity, ambientIntensity);
 
         glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "numLights"), (int)gpuLights.size());
 
@@ -4032,16 +5733,25 @@ int main()
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gMetallicRoughness);
         glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "gMetallicRoughness"), 3);
 
-        if (enableSSAO) {
-            glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, ssaoColorBuffer);
+        if (csm.mEnabled) {
+            csm.BindForReading(5);
+            glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "shadowMapArray"), 5);
+        
+            for (int i = 0; i < CSM::NUM_CASCADES; ++i) {
+                std::string mn = "lightMatrices[" + std::to_string(i) + "]";
+                glUniformMatrix4fv(
+                    glGetUniformLocation(deferredLightingShader.ID, mn.c_str()),
+                    1, GL_FALSE, glm::value_ptr(csm.GetLightMatrices()[i]));
+        
+                std::string sn = "cascadeSplits[" + std::to_string(i) + "]";
+                glUniform1f(
+                    glGetUniformLocation(deferredLightingShader.ID, sn.c_str()),
+                    csm.GetSplitDepths()[i]);
+            }
+        
+            glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "cameraNear"), 0.1f);
+            glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "cameraFar"), 1000.0f);
         }
-        else {
-            glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, whiteTexture);
-        }
-        glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "ssao"), 4);
-
-        glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, depthMap);
-        glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "shadowMap"), 5);
 
         glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "enableContactShadows"),
             enableContactShadows ? 1 : 0);
@@ -4062,7 +5772,8 @@ int main()
         glUniformMatrix4fv(uViewMatrixLoc, 1, GL_FALSE, glm::value_ptr(viewMatrix));
         glUniformMatrix4fv(uInverseViewMatrixLoc, 1, GL_FALSE, glm::value_ptr(inverseView));
 
-        glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightDir"), 1, glm::value_ptr(lightDir));
+        glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightDir"),
+             1, glm::value_ptr(activeLightDir));
         glUniform4fv(glGetUniformLocation(deferredLightingShader.ID, "lightColor"), 1, glm::value_ptr(lightColor));
         glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightPos"), 1, glm::value_ptr(lightPos));
         glUniform3fv(glGetUniformLocation(deferredLightingShader.ID, "lightPos2"), 1, glm::value_ptr(lightPos2));
@@ -4082,12 +5793,9 @@ int main()
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "saturation"), saturation);
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "contrast"), contrast);
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "gamma"), gamma);
-        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "exposure"), exposure);
-
-        glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "enableSSAO"), enableSSAO ? 1 : 0);
-        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "ssaoRadius"), ssaoRadius);
-        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "ssaoBias"), ssaoBias);
-        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "ssaoPower"), ssaoPower);
+        
+        float finalExposure = enableAutoExposure ? currentExposure : exposure;
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "exposure"), finalExposure);
 
         glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "enableBloom"), enableBloom ? 1 : 0);
         glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "bloomThreshold"), bloomThreshold);
@@ -4098,16 +5806,164 @@ int main()
         // ---- Debug View ----
         glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "debugView"), debugView);
 
+        // ---- Bind SSS LUT to texture unit 9 ----
+        glActiveTexture(GL_TEXTURE9);
+        glBindTexture(GL_TEXTURE_2D, sssLUTtexture);
+        glUniform1i(glGetUniformLocation(deferredLightingShader.ID, "sssLUT"), 9);
+        glUniform1f(glGetUniformLocation(deferredLightingShader.ID, "sssCurvatureScale"), 1.0f);
+
         glDisable(GL_DEPTH_TEST);
         glBindVertexArray(rectVAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glEnable(GL_DEPTH_TEST);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+        // ==========================================
+        // SSR Pass
+        // ==========================================
+        if (enableSSR) {
+            // ==========================================
+            // 1) SSR Pass — يكتب على ssrColorBuffer
+            // ==========================================
+            glBindFramebuffer(GL_FRAMEBUFFER, ssrFBO);
+            glViewport(0, 0, width, height);
+            glClear(GL_COLOR_BUFFER_BIT);
+            
+            ssrShader.Activate();
+            
+            // G-Buffer
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gPosition);
+            glUniform1i(glGetUniformLocation(ssrShader.ID, "gPosition"), 0);
+            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gNormal);
+            glUniform1i(glGetUniformLocation(ssrShader.ID, "gNormal"), 1);
+            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gMetallicRoughness);
+            glUniform1i(glGetUniformLocation(ssrShader.ID, "gMetallicRoughness"), 2);
+            glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, finalColorTexture);
+            glUniform1i(glGetUniformLocation(ssrShader.ID, "lightingResult"), 3);
+            
+            // Matrices
+            glUniformMatrix4fv(glGetUniformLocation(ssrShader.ID, "projection"), 1, GL_FALSE, glm::value_ptr(proj));
+            glUniformMatrix4fv(glGetUniformLocation(ssrShader.ID, "view"), 1, GL_FALSE, glm::value_ptr(viewMatrix));
+            
+            // Params (استخدم الـ Variables مش القيم الثابتة)
+            glUniform1f(glGetUniformLocation(ssrShader.ID, "maxDistance"), ssrMaxDistance);
+            glUniform1f(glGetUniformLocation(ssrShader.ID, "thickness"), ssrThickness);
+            glUniform1i(glGetUniformLocation(ssrShader.ID, "maxSteps"), ssrMaxSteps);
+            glUniform1f(glGetUniformLocation(ssrShader.ID, "resolution"), ssrResolution);
+            
+            // ✅ ارندر!
+            glDisable(GL_DEPTH_TEST);
+            glBindVertexArray(rectVAO);
+            glDrawArrays(GL_TRIANGLES, 0, 6);     // ← السطر الناقص
+            glEnable(GL_DEPTH_TEST);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            
+            // ==========================================
+            // 2) Composite — يضيف SSR على المشهد
+            // ==========================================
+            glBindFramebuffer(GL_FRAMEBUFFER, finalColorFBO);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE);
+            
+            ssrCompositeShader.Activate();
+            glActiveTexture(GL_TEXTURE0); 
+            glBindTexture(GL_TEXTURE_2D, ssrColorBuffer);
+            glUniform1i(glGetUniformLocation(ssrCompositeShader.ID, "ssrTexture"), 0);
+            glUniform1f(glGetUniformLocation(ssrCompositeShader.ID, "ssrIntensity"), ssrIntensity);
+            
+            glDisable(GL_DEPTH_TEST);
+            glBindVertexArray(rectVAO);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glEnable(GL_DEPTH_TEST);
+            
+            glDisable(GL_BLEND);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        }
+
+        bloomPass->Render(bloomTexture);  
+
         // ---- Copy for fog ----
-        glCopyImageSubData(finalColorTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
-            litCopyTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
-            width, height, 1);
+        if (enableVolumetricFog) {
+            glCopyImageSubData(finalColorTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
+                litCopyTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
+                width, height, 1);
+        }
+
+        // ==========================================
+        // Auto Exposure Pass
+        // ==========================================
+        if (enableAutoExposure) {
+            // 1. Generate mipmaps of the HDR scene
+            glBindTexture(GL_TEXTURE_2D, finalColorTexture);
+            glGenerateMipmap(GL_TEXTURE_2D);
+            int maxMip = 0;
+            glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &maxMip);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            
+            // 2. Luminance pass → 1x1
+            glBindFramebuffer(GL_FRAMEBUFFER, luminanceFBO);
+            glViewport(0, 0, 1, 1);
+            glDisable(GL_DEPTH_TEST);
+            
+            luminanceShader.Activate();
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, finalColorTexture);
+            glUniform1i(glGetUniformLocation(luminanceShader.ID, "sceneTexture"), 0);
+            
+            int maxMipLevel = (int)std::floor(std::log2((double)std::max(width, height)));
+            glUniform1i(glGetUniformLocation(luminanceShader.ID, "maxMipLevel"), maxMipLevel);
+            
+            glBindVertexArray(rectVAO);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glEnable(GL_DEPTH_TEST);
+            
+            // 3. Exposure adaptation (ping-pong)
+            int writeIdx = 1 - exposurePingPong;
+            int readIdx  = exposurePingPong;
+            
+            glBindFramebuffer(GL_FRAMEBUFFER, exposureFBO[writeIdx]);
+            glViewport(0, 0, 1, 1);
+            glDisable(GL_DEPTH_TEST);
+            
+            exposureShader.Activate();
+            
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, luminanceTex);
+            glUniform1i(glGetUniformLocation(exposureShader.ID, "currentLuminance"), 0);
+            
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, exposureTex[readIdx]);
+            glUniform1i(glGetUniformLocation(exposureShader.ID, "previousExposure"), 1);
+            
+            glUniform1f(glGetUniformLocation(exposureShader.ID, "deltaTime"), deltaTime);
+            glUniform1f(glGetUniformLocation(exposureShader.ID, "minExposure"), minExposure);
+            glUniform1f(glGetUniformLocation(exposureShader.ID, "maxExposure"), maxExposure);
+            glUniform1f(glGetUniformLocation(exposureShader.ID, "keyValue"), keyValue);
+            glUniform1f(glGetUniformLocation(exposureShader.ID, "adaptationSpeed"), adaptationSpeed);
+            
+            glBindVertexArray(rectVAO);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glEnable(GL_DEPTH_TEST);
+            
+            // 4. Read exposure to CPU (1x1 = stall بسيط)
+            glBindFramebuffer(GL_FRAMEBUFFER, exposureFBO[writeIdx]);
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, exposurePBO[exposurePBOIdx]);
+            glReadPixels(0, 0, 1, 1, GL_RED, GL_FLOAT, 0);   // async
+
+            if (!pboFirstFrame) {
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, exposurePBO[1 - exposurePBOIdx]);
+                float* ptr = (float*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+                if (ptr) { currentExposure = *ptr; glUnmapBuffer(GL_PIXEL_PACK_BUFFER); }
+            } else pboFirstFrame = false;
+
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            exposurePBOIdx = 1 - exposurePBOIdx;
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            
+            // 5. Swap ping-pong
+            exposurePingPong = writeIdx;
+            glViewport(0, 0, width, height);
+        }
 
         // ---- Skybox ----
         if (showSkybox) {
@@ -4115,14 +5971,14 @@ int main()
 
             skyboxShader.Activate();
 
-           
+
             glm::mat4 skyView = glm::mat4(glm::mat3(viewMatrix));
 
-           
+
             float aspect = (float)width / (float)height;
             glm::mat4 skyProj = glm::perspective(glm::radians(editorFOV), aspect, 0.1f, 100.0f);
 
-            float scaleFactor = 1.5f;  
+            float scaleFactor = 1.5f;
             glm::mat4 model = glm::scale(glm::mat4(1.0f), glm::vec3(scaleFactor));
 
             glUniformMatrix4fv(glGetUniformLocation(skyboxShader.ID, "view"), 1, GL_FALSE, glm::value_ptr(skyView));
@@ -4172,6 +6028,42 @@ int main()
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
         }
 
+        // ---- Bind LUT to texture unit 8 ----
+        glActiveTexture(GL_TEXTURE8);
+        glBindTexture(GL_TEXTURE_3D, lut.textureID);
+
+        fxaaShader.Activate();
+        glUniform1i(glGetUniformLocation(fxaaShader.ID, "screenTexture"), 0);
+        glUniform1i(glGetUniformLocation(fxaaShader.ID, "uLUT"), 8);
+        glUniform1i(glGetUniformLocation(fxaaShader.ID, "uLUTEnabled"), lutEnabled ? 1 : 0);
+        glUniform1f(glGetUniformLocation(fxaaShader.ID, "uLUTStrength"), lutStrength);
+
+        glUniform1i(glGetUniformLocation(fxaaShader.ID, "enableSharpening"), enableSharpening ? 1 : 0);
+        glUniform1f(glGetUniformLocation(fxaaShader.ID, "sharpeningStrength"), sharpeningStrength);
+
+        glUniform1i(glGetUniformLocation(fxaaShader.ID, "enableVignette"), enableVignette ? 1 : 0);
+        glUniform1f(glGetUniformLocation(fxaaShader.ID, "vignetteStrength"), vignetteStrength);
+        glUniform1f(glGetUniformLocation(fxaaShader.ID, "vignetteRadius"), vignetteRadius);
+
+        glUniform1i(glGetUniformLocation(fxaaShader.ID, "enableChromaticAberration"), enableChromaticAberration ? 1 : 0);
+        glUniform1f(glGetUniformLocation(fxaaShader.ID, "chromaticStrength"), chromaticStrength);
+
+        glUniform1i(glGetUniformLocation(fxaaShader.ID, "enableFilmGrain"), enableFilmGrain ? 1 : 0);
+        glUniform1f(glGetUniformLocation(fxaaShader.ID, "grainStrength"), grainStrength);
+        glUniform1f(glGetUniformLocation(fxaaShader.ID, "grainTime"), (float)glfwGetTime());
+
+        // ---- Bind finalColorTexture to unit 0 ----
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, finalColorTexture);
+
+        // Bind Bloom texture to unit 2
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, bloomPass->GetBloomTexture());
+
+        glUniform1i(glGetUniformLocation(fxaaShader.ID, "bloomTexture"), 2);
+        glUniform1i(glGetUniformLocation(fxaaShader.ID, "enableBloom"), enableBloom ? 1 : 0);
+        glUniform1f(glGetUniformLocation(fxaaShader.ID, "bloomIntensity"), bloomCompositeStrength);
+
         // ---- FXAA (only if enabled) ----
         if (enableFXAA) {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -4196,6 +6088,7 @@ int main()
             glUniform1i(glGetUniformLocation(fxaaShader.ID, "screenTexture"), 0);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, finalColorTexture);
+            // glBindTexture(GL_TEXTURE_2D, ssrColorBuffer);  
             glUniform2f(glGetUniformLocation(fxaaShader.ID, "screenSize"), (float)width, (float)height);
             glDisable(GL_DEPTH_TEST);
             glBindVertexArray(rectVAO);
@@ -4203,6 +6096,129 @@ int main()
             glEnable(GL_DEPTH_TEST);
         }
 
+        // ============================================================
+        //              RENDER LIGHT GIZMOS (always)
+        // ============================================================
+        if (!gizmoLines.empty()) {
+            std::vector<float> vertices;
+            vertices.reserve(gizmoLines.size() * 6 * 2);
+            glm::mat4 MVP = camera.cameraMatrix;
+
+            for (const auto& line : gizmoLines) {
+                vertices.push_back(line.start.x);
+                vertices.push_back(line.start.y);
+                vertices.push_back(line.start.z);
+                vertices.push_back(line.color.x);
+                vertices.push_back(line.color.y);
+                vertices.push_back(line.color.z);
+                vertices.push_back(line.end.x);
+                vertices.push_back(line.end.y);
+                vertices.push_back(line.end.z);
+                vertices.push_back(line.color.x);
+                vertices.push_back(line.color.y);
+                vertices.push_back(line.color.z);
+            }
+
+            glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
+            glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_DYNAMIC_DRAW);
+
+            lineShader.Activate();
+            glUniformMatrix4fv(glGetUniformLocation(lineShader.ID, "uMVP"), 1, GL_FALSE, glm::value_ptr(MVP));
+
+            glBindVertexArray(lineVAO);
+            glDisable(GL_DEPTH_TEST);   // ← شفاف من خلال المجسمات
+            glDrawArrays(GL_LINES, 0, (GLsizei)(vertices.size() / 6));
+            glEnable(GL_DEPTH_TEST);
+            glBindVertexArray(0);
+        }
+        // ============================================================
+        //        MATERIAL DEBUG BOX — highlights selected mesh
+        // ============================================================
+        if (showMaterialDebugBox &&
+            selectedEntity >= 0 &&
+            selectedEntity < (int)entities.size())
+{
+    EditorEntity& dbgEntity = entities[selectedEntity];
+
+    if (dbgEntity.model &&
+        !dbgEntity.materialSlots.empty() &&
+        dbgEntity.selectedMaterialSlot >= 0 &&
+        dbgEntity.selectedMaterialSlot < (int)dbgEntity.materialSlots.size())
+    {
+        int meshIdx = dbgEntity.materialSlots[dbgEntity.selectedMaterialSlot].meshIndex;
+
+        if (meshIdx >= 0 && meshIdx < (int)dbgEntity.model->meshes.size())
+        {
+            const Mesh& mesh = dbgEntity.model->meshes[meshIdx];
+
+            // Compute mesh AABB in world space
+            glm::vec3 meshMin = mesh.aabbMin;
+            glm::vec3 meshMax = mesh.aabbMax;
+
+            // If mesh AABB is empty, fall back to mesh's own vertex scan
+            if (meshMin.x > meshMax.x) {
+                meshMin = glm::vec3(FLT_MAX);
+                meshMax = glm::vec3(-FLT_MAX);
+                for (const auto& v : mesh.vertices) {
+                    meshMin = glm::min(meshMin, v.position);
+                    meshMax = glm::max(meshMax, v.position);
+                }
+            }
+
+            // Apply mesh's local transform (matricesMeshes[meshIdx])
+            glm::mat4 meshLocal = glm::mat4(1.0f);
+            if (meshIdx < (int)dbgEntity.model->matricesMeshes.size())
+                meshLocal = dbgEntity.model->matricesMeshes[meshIdx];
+
+            // Apply entity world transform
+            glm::mat4 world = glm::mat4(1.0f);
+            world = glm::rotate(world, glm::radians(dbgEntity.rotation.x), glm::vec3(1, 0, 0));
+            world = glm::rotate(world, glm::radians(dbgEntity.rotation.y), glm::vec3(0, 1, 0));
+            world = glm::rotate(world, glm::radians(dbgEntity.rotation.z), glm::vec3(0, 0, 1));
+            world = glm::translate(world, dbgEntity.position);
+            world = glm::scale(world, dbgEntity.scale);
+
+            glm::mat4 finalMat = world * meshLocal;
+
+            // Transform all 8 corners
+            glm::vec3 c[8] = {
+                { meshMin.x, meshMin.y, meshMin.z },
+                { meshMax.x, meshMin.y, meshMin.z },
+                { meshMax.x, meshMax.y, meshMin.z },
+                { meshMin.x, meshMax.y, meshMin.z },
+                { meshMin.x, meshMin.y, meshMax.z },
+                { meshMax.x, meshMin.y, meshMax.z },
+                { meshMax.x, meshMax.y, meshMax.z },
+                { meshMin.x, meshMax.y, meshMax.z }
+            };
+            for (int i = 0; i < 8; ++i) {
+                glm::vec4 p = finalMat * glm::vec4(c[i], 1.0f);
+                c[i] = glm::vec3(p);
+            }
+
+            const int edges[12][2] = {
+                {0,1},{1,2},{2,3},{3,0},
+                {4,5},{5,6},{6,7},{7,4},
+                {0,4},{1,5},{2,6},{3,7}
+            };
+
+            // Add to gizmoLines (rendered in overlay)
+            for (int i = 0; i < 12; ++i) {
+                gizmoLines.push_back({ c[edges[i][0]], c[edges[i][1]],
+                                       materialDebugBoxColor, 0.0f });
+            }
+
+            // Add corner markers — small crosses at each corner
+            float markerSize = 0.05f;
+            for (int i = 0; i < 8; ++i) {
+                glm::vec3 p = c[i];
+                gizmoLines.push_back({ p - glm::vec3(markerSize,0,0), p + glm::vec3(markerSize,0,0), materialDebugBoxColor, 0.0f });
+                gizmoLines.push_back({ p - glm::vec3(0,markerSize,0), p + glm::vec3(0,markerSize,0), materialDebugBoxColor, 0.0f });
+                gizmoLines.push_back({ p - glm::vec3(0,0,markerSize), p + glm::vec3(0,0,markerSize), materialDebugBoxColor, 0.0f });
+            }
+        }
+    }
+}
         // ---- Debug Lines ----
 #ifdef _DEBUG
         if (!debugLines.empty()) {
@@ -4269,5 +6285,6 @@ int main()
     delete Factory::sInstance;
     Factory::sInstance = nullptr;
 
+    std::cerr << "=== MAIN END ===" << std::endl;
     return 0;
 }

@@ -17,7 +17,7 @@ Editor::Editor(int width, int height, const std::vector<std::string>& paths)
     }
     CreateGrid();
 
-    // Create white texture for SSAO/ShadowMap
+    // Create white texture for gtao/ShadowMap
     glGenTextures(1, &whiteTexture);
     glBindTexture(GL_TEXTURE_2D, whiteTexture);
     unsigned char whitePixel[] = { 255, 255, 255 };
@@ -141,8 +141,8 @@ void Editor::Draw(Camera& camera, Shader& gBufferShader, Shader& lightingShader,
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gColor); glUniform1i(glGetUniformLocation(lightingShader.ID, "gColor"), 2);
     glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gMetallicRoughness); glUniform1i(glGetUniformLocation(lightingShader.ID, "gMetallicRoughness"), 3);
 
-    // Bind white textures for SSAO and ShadowMap
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, whiteTexture); glUniform1i(glGetUniformLocation(lightingShader.ID, "ssao"), 4);
+    // Bind white textures for gtao and ShadowMap
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, whiteTexture); glUniform1i(glGetUniformLocation(lightingShader.ID, "gtao"), 4);
     glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, whiteTexture); glUniform1i(glGetUniformLocation(lightingShader.ID, "shadowMap"), 5);
 
     // Set light uniforms

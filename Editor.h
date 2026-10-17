@@ -35,7 +35,7 @@ private:
     // Grid VAO/VBO
     unsigned int gridVAO = 0, gridVBO = 0;
 
-    // White texture for SSAO / ShadowMap
+    // White texture for gtao / ShadowMap
     unsigned int whiteTexture = 0;
 
     void AddEntity(int modelIndex, glm::vec3 pos, glm::vec3 rot, glm::vec3 scale);

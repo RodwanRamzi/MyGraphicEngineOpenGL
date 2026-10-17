@@ -18,11 +18,10 @@ public:
 
     Shader(const char* vertexFile, const char* fragmentFile, const char* geometryFile);
 
-
     void Activate();
-
     void Delete();
 
 private:
-    void compileErrors(unsigned int shader, const char* type);
+    void compileErrors(unsigned int shader, const char* type, const char* filename = "");
+    static std::string resolvePath(const char* filename);
 };

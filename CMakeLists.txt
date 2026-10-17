@@ -1,45 +1,69 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.20)
 project(MyGraphicEngineOpenGL)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-include_directories(
-    . 
-    imgui
+# ==========================================
+# تعريفات المعالج
+# ==========================================
+add_compile_definitions(
+    _CONSOLE
+    JPH_PROFILE_ENABLED
+    JPH_FLOATING_POINT_EXCEPTIONS_ENABLED
+    JPH_USE_AVX2
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
 )
 
-set(SOURCES
-    main.cpp
-    Subsystems.cpp
-    Subsystems.h
+# ==========================================
+# ملفات المصدر
+# ==========================================
+add_executable(MyGraphicEngineOpenGL
+    Main.cpp
+    Camera.cpp
+    ComputeShader.cpp
+    EBO.cpp
+    Editor.cpp
     GameObject.cpp
-    GameObject.h
+    BloomPass.cpp
+    AsyncLoader.cpp	
+    CSM.cpp	
+    glad.c
     imgui/imgui.cpp
-    imgui/imgui.h
+    imgui/imgui_demo.cpp
     imgui/imgui_draw.cpp
+    imgui/imgui_impl_glfw.cpp
+    imgui/imgui_impl_opengl3.cpp
     imgui/imgui_tables.cpp
     imgui/imgui_widgets.cpp
-    imgui/imgui_impl_glfw.cpp
-    imgui/imgui_impl_glfw.h
-    imgui/imgui_impl_opengl3.cpp
-    imgui/imgui_impl_opengl3.h
-    imgui/imgui_internal.h
-    imgui/imconfig.h
-    imgui/imstb_rectpack.h
-    imgui/imstb_textedit.h
-    imgui/imstb_truetype.h
+    Libraries/include/imguizmo/ImGuizmo.cpp
+    LuaManager.cpp
+    LUT.cpp
+    Mesh.cpp
+    ScriptComponent.cpp
+    shaderClass.cpp
+    Model.cpp
+    stb.cpp
+    Terrain.cpp
+    Texture.cpp
+    VAO.cpp
+    VBO.cpp
 )
 
-add_executable(${MyGraphicEngineOpenGL} ${SOURCES})
+# ملفات Jolt Physics (جمع تلقائي)
+file(GLOB_RECURSE JOLT_SOURCES "Libraries/include/Jolt/*.cpp")
+target_sources(MyGraphicEngineOpenGL PRIVATE ${JOLT_SOURCES})
 
-find_package(glfw3 REQUIRED)
-find_package(glad REQUIRED)
-find_package(assimp REQUIRED)
-
-target_link_libraries(${MyGraphicEngineOpenGL} 
-    glfw 
-    glad 
-    assimp
+# ==========================================
+# مسارات الـ Include
+# ==========================================
+target_include_directories(MyGraphicEngineOpenGL PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/include/sol
+    ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/include/lua
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgui
 )
 
 # ==========================================
@@ -48,6 +72,7 @@ target_link_libraries(${MyGraphicEngineOpenGL}
 target_link_directories(MyGraphicEngineOpenGL PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/lib
 )
+
 
 
 # ==========================================
@@ -194,38 +219,6 @@ foreach(model ${ROOT_MODELS})
         "$<TARGET_FILE_DIR:MyGraphicEngineOpenGL>"
     )
 endforeach()
-
-# ============================================================
-#     Copy shaders and assets to build folder after build
-# ============================================================
-add_custom_command(TARGET MyGraphicEngineOpenGL POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
-        "$<TARGET_FILE_DIR:MyGraphicEngineOpenGL>/shaders"
-    COMMENT "Copying shaders to build folder"
-)
-
-# Same for other runtime assets
-add_custom_command(TARGET MyGraphicEngineOpenGL POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/luts"
-        "$<TARGET_FILE_DIR:MyGraphicEngineOpenGL>/luts"
-    COMMENT "Copying LUTs to build folder"
-)
-
-add_custom_command(TARGET MyGraphicEngineOpenGL POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/cubemap"
-        "$<TARGET_FILE_DIR:MyGraphicEngineOpenGL>/cubemap"
-    COMMENT "Copying cubemap to build folder"
-)
-
-add_custom_command(TARGET MyGraphicEngineOpenGL POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/models"
-        "$<TARGET_FILE_DIR:MyGraphicEngineOpenGL>/models"
-    COMMENT "Copying models to build folder"
-)
 
 # ==========================================
 # رسالة نهائية

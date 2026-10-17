@@ -1,0 +1,17 @@
+[
+    {
+        "name": "Visual Studio Build Tools 2022 - x64",
+        "environmentSetupScript": "F:/Microsoft Visual Studio 2022/2022/BuildTools/VC/Auxiliary/Build/vcvarsall.bat",
+        "preferredGenerator": {
+            "name": "NMake Makefiles"
+        },
+        "cmakeSettings": {
+            "CMAKE_BUILD_TYPE": "Release"
+        },
+        "environmentVariables": {
+            "PATH": "F:/Microsoft Visual Studio 2022/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64;${env:PATH}"
+        },
+        "keep": true,
+        "isTrusted": true
+    }
+]
