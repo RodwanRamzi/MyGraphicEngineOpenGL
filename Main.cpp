@@ -44,6 +44,13 @@ namespace fs = std::filesystem;
 #include "ScriptComponent.h"
 #include "LUT.h"
 
+#include "src/utils/PathUtils.h"
+#include "src/utils/FileUtils.h"
+#include "src/core/JoltCallbacks.h"
+#include "src/renderer/Frustum.h"
+#include "src/physics/Collision.h"
+#include "src/editor/Theme.h"
+
 // ============================================================
 //              LUT LOADER (uses existing stb_image from Model.h)
 // ============================================================
@@ -412,25 +419,6 @@ void LoadSkyboxFromFolder(const std::string& folderPath, GLuint& outCubemap) {
     std::cout << "[Skybox] Cubemap loaded from: " << folderPath << std::endl;
 }
 
-// ============================================================
-//                     FILE DIALOG HELPER
-// ============================================================
-std::string OpenFileDialog(const std::string& title, const std::string& filter = "All Files\0*.*\0", GLFWwindow* win = NULL) {
-    OPENFILENAMEA ofn = {};
-    char fileName[MAX_PATH] = "";
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = GetActiveWindow();
-    ofn.lpstrFilter = filter.c_str();
-    ofn.lpstrFile = fileName;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
-    ofn.lpstrTitle = title.c_str();
-    if (GetOpenFileNameA(&ofn)) {
-        return std::string(fileName);
-    }
-    return "";
-}
-
 #include <unordered_map>
 std::unordered_map<std::string, GLuint> textureCache;
 
@@ -460,125 +448,6 @@ GLuint LoadTextureFromFile(const std::string& path) {
     return tex;
 }
 
-// ============================================================
-//                  AABB & COLLISION HELPERS
-// ============================================================
-#undef min
-#undef max
-
-bool ComputeModelAABB(Model* model, glm::vec3& outMin, glm::vec3& outMax) {
-    if (!model || model->meshes.empty()) return false;
-    outMin = glm::vec3(FLT_MAX);
-    outMax = glm::vec3(-FLT_MAX);
-    for (const auto& mesh : model->meshes) {
-        for (const auto& vertex : mesh.vertices) {
-            outMin = glm::min(outMin, vertex.position);
-            outMax = glm::max(outMax, vertex.position);
-        }
-    }
-    return true;
-}
-
-ShapeRefC CreateCollisionShapeFromAABB(const glm::vec3& min, const glm::vec3& max) {
-    glm::vec3 size = max - min;
-    float x = size.x, y = size.y, z = size.z;
-    if (y > x * 1.5f && y > z * 1.5f) {
-        float radius = std::max(x, z) * 0.5f;
-        float halfHeight = y * 0.5f - radius;
-        if (halfHeight < 0.1f) halfHeight = 0.1f;
-        return new CapsuleShape(halfHeight, radius);
-    }
-    else if (std::abs(x - y) < 0.1f && std::abs(x - z) < 0.1f) {
-        float radius = (x + y + z) / 6.0f;
-        return new SphereShape(radius);
-    }
-    else {
-        return new BoxShape(Vec3(x * 0.5f, y * 0.5f, z * 0.5f));
-    }
-}
-
-// ============================================================
-//                  JOLT CALLBACKS
-// ============================================================
-static void TraceImpl(const char* inFMT, ...) {
-    va_list list;
-    va_start(list, inFMT);
-    char buffer[1024];
-    vsnprintf(buffer, sizeof(buffer), inFMT, list);
-    va_end(list);
-    std::cout << buffer << std::endl;
-}
-
-#ifdef JPH_ENABLE_ASSERTS
-static bool AssertFailedImpl(const char* inExpression, const char* inMessage, const char* inFile, uint inLine) {
-    std::cout << inFile << ":" << inLine << ": (" << inExpression << ") " << (inMessage != nullptr ? inMessage : "") << std::endl;
-    return true;
-};
-#endif
-
-namespace Layers {
-    static constexpr ObjectLayer NON_MOVING = 0;
-    static constexpr ObjectLayer MOVING = 1;
-    static constexpr ObjectLayer NUM_LAYERS = 2;
-};
-
-class ObjectLayerPairFilterImpl : public ObjectLayerPairFilter {
-public:
-    virtual bool ShouldCollide(ObjectLayer inObject1, ObjectLayer inObject2) const override {
-        switch (inObject1) {
-        case Layers::NON_MOVING:
-            return inObject2 == Layers::MOVING;
-        case Layers::MOVING:
-            return true;
-        default:
-            JPH_ASSERT(false);
-            return false;
-        }
-    }
-};
-
-namespace BroadPhaseLayers {
-    static constexpr BroadPhaseLayer NON_MOVING(0);
-    static constexpr BroadPhaseLayer MOVING(1);
-    static constexpr uint NUM_LAYERS = 2;
-};
-
-class BPLayerInterfaceImpl final : public BroadPhaseLayerInterface {
-public:
-    BPLayerInterfaceImpl() {
-        mObjectToBroadPhase[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
-        mObjectToBroadPhase[Layers::MOVING] = BroadPhaseLayers::MOVING;
-    }
-    virtual uint GetNumBroadPhaseLayers() const { return BroadPhaseLayers::NUM_LAYERS; }
-    virtual BroadPhaseLayer GetBroadPhaseLayer(ObjectLayer inLayer) const override {
-        JPH_ASSERT(inLayer < Layers::NUM_LAYERS);
-        return mObjectToBroadPhase[inLayer];
-    }
-    virtual const char* GetBroadPhaseLayerName(BroadPhaseLayer inLayer) const override {
-        if (inLayer == BroadPhaseLayers::NON_MOVING) return "NON_MOVING";
-        if (inLayer == BroadPhaseLayers::MOVING)     return "MOVING";
-        JPH_ASSERT(false);
-        return "INVALID";
-    }
-private:
-    BroadPhaseLayer mObjectToBroadPhase[Layers::NUM_LAYERS];
-};
-
-class ObjectVsBroadPhaseLayerFilterImpl : public ObjectVsBroadPhaseLayerFilter {
-public:
-    virtual bool ShouldCollide(ObjectLayer inLayer1, BroadPhaseLayer inLayer2) const override {
-        switch (inLayer1) {
-        case Layers::NON_MOVING:
-            return inLayer2 == BroadPhaseLayers::MOVING;
-        case Layers::MOVING:
-            return true;
-        default:
-            JPH_ASSERT(false);
-            return false;
-        }
-    }
-};
-
 GLuint LoadSimpleCubemap(const std::vector<std::string>& faces) {
     GLuint textureID;
     glGenTextures(1, &textureID);
@@ -603,69 +472,6 @@ GLuint LoadSimpleCubemap(const std::vector<std::string>& faces) {
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
     return textureID;
-}
-
-// ============================================================
-//               IMGUI DARK PRO THEME
-// ============================================================
-void SetDarkProTheme() {
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowPadding = ImVec2(10, 10);
-    style.FramePadding = ImVec2(8, 6);
-    style.ItemSpacing = ImVec2(8, 6);
-    style.ItemInnerSpacing = ImVec2(4, 4);
-    style.IndentSpacing = 20.0f;
-    style.ScrollbarSize = 14.0f;
-    style.GrabMinSize = 12.0f;
-    style.WindowRounding = 4.0f;
-    style.FrameRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.PopupRounding = 4.0f;
-
-    ImVec4* colors = style.Colors;
-    colors[ImGuiCol_WindowBg] = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
-    colors[ImGuiCol_ChildBg] = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
-    colors[ImGuiCol_PopupBg] = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
-    colors[ImGuiCol_Border] = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.15f, 0.15f, 0.18f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.22f, 0.22f, 0.28f, 1.00f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
-    colors[ImGuiCol_TitleBg] = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
-    colors[ImGuiCol_TitleBgActive] = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
-    colors[ImGuiCol_MenuBarBg] = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
-    colors[ImGuiCol_ScrollbarBg] = ImVec4(0.05f, 0.05f, 0.07f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.30f, 0.30f, 0.35f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.40f, 0.40f, 0.45f, 1.00f);
-    colors[ImGuiCol_CheckMark] = ImVec4(0.20f, 0.60f, 0.90f, 1.00f);
-    colors[ImGuiCol_SliderGrab] = ImVec4(0.20f, 0.60f, 0.90f, 1.00f);
-    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.30f, 0.70f, 1.00f, 1.00f);
-    colors[ImGuiCol_Button] = ImVec4(0.15f, 0.15f, 0.18f, 1.00f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.22f, 0.28f, 1.00f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.28f, 0.28f, 0.34f, 1.00f);
-    colors[ImGuiCol_Header] = ImVec4(0.15f, 0.15f, 0.18f, 1.00f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.22f, 0.22f, 0.28f, 1.00f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.28f, 0.28f, 0.34f, 1.00f);
-    colors[ImGuiCol_Separator] = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
-    colors[ImGuiCol_Text] = ImVec4(0.85f, 0.85f, 0.90f, 1.00f);
-    colors[ImGuiCol_TextDisabled] = ImVec4(0.40f, 0.40f, 0.45f, 1.00f);
-    colors[ImGuiCol_PlotLines] = ImVec4(0.20f, 0.60f, 0.90f, 1.00f);
-    colors[ImGuiCol_PlotHistogram] = ImVec4(0.20f, 0.60f, 0.90f, 1.00f);
-}
-
-// ============================================================
-//                     RESET HELPER
-// ============================================================
-void ResetSliderButton(const char* label, float* value, float defaultValue, const char* tooltip = "") {
-    ImGui::SameLine();
-    if (ImGui::SmallButton(("R##" + std::string(label)).c_str())) {
-        *value = defaultValue;
-    }
-    if (!tooltip || strlen(tooltip) > 0) {
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Reset to default: %.2f", defaultValue);
-        }
-    }
 }
 
 
@@ -867,7 +673,6 @@ struct Prefab {
 
 // Helpers
 std::vector<EditorEntity> copyEntities(const std::vector<EditorEntity>& src) { return src; }
-std::string normalizePath(const std::string& path) { std::string result = path; std::replace(result.begin(), result.end(), '\\', '/'); return result; }
 
 std::vector<std::string> scanModelsFolder(const std::string& folderPath) {
     std::vector<std::string> modelFiles;
@@ -1018,65 +823,6 @@ const int edges[12][2] = {
 for (int i = 0; i < 12; ++i) {
 lines.push_back({ c[edges[i][0]], c[edges[i][1]], color, 0.0f });
 }
-}
-
-struct Frustum {
-    glm::vec4 planes[6];
-};
-
-Frustum extractFrustum(const glm::mat4& viewProj) {
-    Frustum frustum;
-    frustum.planes[0] = glm::vec4(viewProj[0][3] + viewProj[0][0],
-        viewProj[1][3] + viewProj[1][0],
-        viewProj[2][3] + viewProj[2][0],
-        viewProj[3][3] + viewProj[3][0]);
-    frustum.planes[1] = glm::vec4(viewProj[0][3] - viewProj[0][0],
-        viewProj[1][3] - viewProj[1][0],
-        viewProj[2][3] - viewProj[2][0],
-        viewProj[3][3] - viewProj[3][0]);
-    frustum.planes[2] = glm::vec4(viewProj[0][3] + viewProj[0][1],
-        viewProj[1][3] + viewProj[1][1],
-        viewProj[2][3] + viewProj[2][1],
-        viewProj[3][3] + viewProj[3][1]);
-    frustum.planes[3] = glm::vec4(viewProj[0][3] - viewProj[0][1],
-        viewProj[1][3] - viewProj[1][1],
-        viewProj[2][3] - viewProj[2][1],
-        viewProj[3][3] - viewProj[3][1]);
-    frustum.planes[4] = glm::vec4(viewProj[0][3] + viewProj[0][2],
-        viewProj[1][3] + viewProj[1][2],
-        viewProj[2][3] + viewProj[2][2],
-        viewProj[3][3] + viewProj[3][2]);
-    frustum.planes[5] = glm::vec4(viewProj[0][3] - viewProj[0][2],
-        viewProj[1][3] - viewProj[1][2],
-        viewProj[2][3] - viewProj[2][2],
-        viewProj[3][3] - viewProj[3][2]);
-    for (int i = 0; i < 6; i++) {
-        float length = glm::length(glm::vec3(frustum.planes[i]));
-        frustum.planes[i] /= length;
-    }
-    return frustum;
-}
-
-bool isSphereInFrustum(const Frustum& frustum, const glm::vec3& center, float radius) {
-    for (int i = 0; i < 6; i++) {
-        float distance = glm::dot(frustum.planes[i], glm::vec4(center, 1.0f));
-        if (distance < -radius) return false;
-    }
-    return true;
-}
-
-// ============================================================
-//                     FILE READING
-// ============================================================
-std::string readFile(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open file: " << filename << std::endl;
-        return "";
-    }
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
 }
 
 // ---- Debug View ----
@@ -1830,10 +1576,9 @@ int main()
     std::cout << "[Jolt] Initializing Physics System..." << std::endl;
 
     RegisterDefaultAllocator();
-    Trace = TraceImpl;
-    JPH_IF_ENABLE_ASSERTS(AssertFailed = AssertFailedImpl;)
+    RegisterJoltTrace();
 
-        Factory::sInstance = new Factory();
+    Factory::sInstance = new Factory();
     RegisterTypes();
 
     TempAllocatorImpl temp_allocator(10 * 1024 * 1024);

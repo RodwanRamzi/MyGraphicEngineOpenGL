@@ -5,9 +5,17 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "${workspaceFolder}/Libraries/include",
-                "${workspaceFolder}/Libraries/include/sol",
+                "${workspaceFolder}/Libraries/include/Jolt",
+                "${workspaceFolder}/Libraries/include/glm",
+                "${workspaceFolder}/Libraries/include/glad",
+                "${workspaceFolder}/Libraries/include/GLFW",
+                "${workspaceFolder}/imgui",
                 "${workspaceFolder}/Libraries/include/lua",
-                "${workspaceFolder}/imgui"
+                "${workspaceFolder}/Libraries/include/sol",
+                "${workspaceFolder}/Libraries/include/stb",
+                "${workspaceFolder}/Libraries/include/json",
+                "${workspaceFolder}/imgui",
+                "${workspaceFolder}/Libraries/include/imguizmo"
             ],
             "defines": [
                 "_DEBUG",

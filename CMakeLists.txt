@@ -49,6 +49,12 @@ add_executable(MyGraphicEngineOpenGL
     Texture.cpp
     VAO.cpp
     VBO.cpp
+    src/utils/PathUtils.cpp
+    src/utils/FileUtils.cpp
+    src/core/JoltCallbacks.cpp
+    src/renderer/Frustum.cpp
+    src/physics/Collision.cpp
+    src/editor/Theme.cpp
 )
 
 # ملفات Jolt Physics (جمع تلقائي)
