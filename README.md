@@ -4,7 +4,6 @@
 [![OpenGL](https://img.shields.io/badge/OpenGL-4.6-green.svg)](https://www.opengl.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Git LFS](https://img.shields.io/badge/Git_LFS-enabled-orange.svg)](https://git-lfs.com)
-[![XERJ Corpus Hub contributor](https://xerj.org)](https://xerj.org)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 <p align="center">
